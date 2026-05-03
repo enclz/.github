@@ -29,6 +29,7 @@ Enclz takes a fourth path. Per-tx, daily, and hourly caps live in the smart cont
 - **No private key for the agent** — scoped API key only; revocable instantly; reissued via one-time invitation code.
 - **Agent REST API** — transfer, swap, deposit, withdraw, balance, limits, history, simulate, webhooks.
 - **MCP server** (`@enclz/mcp-server`) — drop-in tool integration for Claude Desktop, Cursor, and any MCP runtime; one env var to configure.
+- **Program SDK** (`@enclz/sdk`) — Anchor IDL, TypeScript types, and program ID for direct on-chain callers (backend, composing programs, auditors); also published on-chain for `Program.fetchIdl()`. AI agents do not need this — they use the Agent REST API or MCP server.
 - **Simulation endpoint** — dry-run any transfer or swap against current limits and whitelist state without submitting a transaction.
 - **Webhooks** — `transfer.confirmed`, `payment.received`, plus fleet-level policy alerts (`policy.limit_threshold`, `policy.whitelist_expiring`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, `policy.whitelist_violation`).
 - **Jupiter swap + lending integrations** — swaps via Jupiter v6; deposits and withdrawals against whitelisted protocols (e.g. Kamino).

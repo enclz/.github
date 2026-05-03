@@ -236,6 +236,18 @@ Rather than maintaining language-specific SDKs, Enclz ships two integration arti
 
 ---
 
+## Program Integration Resources
+
+The "no SDK required" claim above describes the **agent integration path** (Agent REST API + MCP server). A separate audience — direct on-chain callers — does need typed program bindings: the Enclz backend itself, programs composing with Enclz via CPI, security researchers, and auditors. For these consumers Enclz ships two distribution channels for the Anchor IDL and TypeScript types.
+
+**`@enclz/sdk`** — npm package re-exporting the Anchor IDL JSON, the `Enclz` TypeScript type, and the program ID. Consumers get `Program<Enclz>` typing in two lines: `npm install @enclz/sdk @coral-xyz/anchor @solana/web3.js`, then `new Program<Enclz>(IDL, provider)`. The package version is single-sourced from `programs/enclz/Cargo.toml` via the IDL `metadata.version`, so the published SDK version always identifies the program version that produced it. `@coral-xyz/anchor` is a peer dependency — the SDK ships only types and IDL JSON, never the Anchor runtime.
+
+**On-chain IDL** — the same IDL is published on-chain on every cluster Enclz is deployed to, so `Program.fetchIdl(programId, provider)` returns a typed program handle without installing any package. Useful for explorers, auditors, and integrators who want to verify the IDL against on-chain bytecode rather than trust an npm tarball.
+
+Neither channel is required for AI agents using the Agent REST API or MCP server — those paths remain SDK-free. The program bindings exist for direct on-chain integration, which is a fundamentally different use case from agent invocation.
+
+---
+
 ## Monetization
 
 **Protocol fee** — Enclz deducts a flat 10 basis points (0.1%) from every outbound transfer and swap at execution time. Collected on-chain. No separate billing, no off-chain settlement.

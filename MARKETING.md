@@ -157,11 +157,13 @@ One file per interview: date, persona type, framework used, current payment appr
 | Solana-native | Yes | EVM-first | Yes | Recently added | Yes |
 | Per-agent policy | Yes, on-chain | Yes, on-chain | Off-chain limits | Backend config | No |
 | TTL + amount-capped external whitelist | Yes, on-chain | No | No | No | No |
-| No SDK required | Yes (REST + MCP) | No | Yes | No | No |
+| No SDK required¹ | Yes (REST + MCP) | No | Yes | No | No |
 | Simulation / dry-run | Yes | No | No | No | No |
 | Anomaly alerting | Yes (webhooks) | No | No | No | No |
 | MCP server | Yes | No | No | No | No |
 | Agent context injection | Yes (AGENT_SKILL.md) | No | No | No | No |
+
+¹ "No SDK required" describes the **agent integration path** (Agent REST API + MCP server). Direct on-chain callers — the Enclz backend, programs composing via CPI, security researchers, auditors — may use `@enclz/sdk` (npm) or fetch the IDL on-chain via `Program.fetchIdl()`. See `REQUIREMENTS.md` § Program Integration Resources.
 
 **Lead with**: enforcement survives backend compromise AND no SDK required AND TTL + amount-capped whitelist that auto-voids on-chain. Openfort can match the backend-compromise claim but requires an SDK, is EVM-first, and has no per-address amount ceiling or auto-void mechanic. No competitor ships a simulation endpoint, MCP server, or on-chain amount-exhaustion enforcement.
 

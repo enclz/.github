@@ -1064,6 +1064,43 @@ Location: `mcp/`
 
 ---
 
+## Program Integration Resources
+
+Distinct from agent integration above. Program-level bindings exist for direct on-chain callers — the Enclz backend itself, programs composing with Enclz via CPI, auditors, and security researchers. AI agents do not consume these; they use the Agent REST API or MCP server.
+
+### `@enclz/sdk` (npm)
+
+TypeScript package re-exporting the Anchor IDL JSON, the `Enclz` TypeScript type, and the program ID for `Program<Enclz>` construction.
+
+**Package:** `@enclz/sdk`
+**Install:** `npm install @enclz/sdk @coral-xyz/anchor @solana/web3.js`
+**Peer dependencies:** `@coral-xyz/anchor` (the SDK ships only types + IDL JSON, never the Anchor runtime)
+
+```typescript
+import { IDL, PROGRAM_ID, type Enclz } from "@enclz/sdk";
+import { Program, AnchorProvider } from "@coral-xyz/anchor";
+
+const program = new Program<Enclz>(IDL, AnchorProvider.env());
+```
+
+**Versioning:** `version` is single-sourced from `programs/enclz/Cargo.toml` via the IDL `metadata.version`. Bumping the program version automatically bumps the SDK on the next `npm run build:sdk`. Published SDK version always identifies the program version that produced it.
+
+Location: `sdk/` (built artifacts in `sdk/dist/`, source IDL/types in `sdk/src/` are gitignored and regenerated from `target/`).
+
+### On-chain IDL
+
+The same IDL is uploaded on-chain on every cluster Enclz is deployed to via `anchor idl init` / `anchor idl upgrade`. Consumers can fetch it without installing the npm package:
+
+```typescript
+import { Program } from "@coral-xyz/anchor";
+const idl = await Program.fetchIdl(programId, provider);
+const program = new Program(idl!, provider);
+```
+
+Useful for explorers, auditors, and integrators who prefer to verify the IDL against on-chain bytecode rather than depend on an npm tarball. Upload requires the program upgrade authority signature, so this channel is owned by whoever holds the deployer keypair.
+
+---
+
 ## Web App
 
 ### Stack
