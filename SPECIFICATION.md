@@ -118,27 +118,34 @@ Existence = whitelisted. Close account = removed.
 ### Instructions
 
 #### `initialize_group`
-Creates `GroupConfig` PDA. Owner signs.
+Creates `GroupConfig` PDA and a `WhitelistEntry` PDA for the DEX swap router (`entry_type = 2`, permanent), so swaps work immediately after provisioning. Owner signs.
 
 ```
 Accounts:
   owner               [signer, writable]
   group_config        [writable, init]  PDA
+  dex_router_entry    [writable, init]  PDA  // type-2 whitelist for the swap router
   system_program
 
 Args:
   backend_operator:     Pubkey
   protocol_fee_wallet:  Pubkey   // Enclz's fee collection wallet
+  dex_router:           Pubkey   // swap aggregator program ID; whitelisted as type-2
 ```
 
 #### `add_agent`
-Creates an `AgentWallet` PDA + its ATAs. Auto-adds agent's PDA to group whitelist as `entry_type = 0` (intra-group, permanent, unlimited).
+Creates an `AgentWallet` PDA + its ATA for the supplied mint. Auto-adds the agent's PDA to the group whitelist as `entry_type = 0` (intra-group, permanent, unlimited). Call once per token the agent will hold; subsequent agents in the same group reuse the same `mint` argument shape.
 
 ```
 Accounts:
-  owner          [signer, writable]
-  group_config   [writable]
-  agent_wallet   [writable, init]  PDA
+  owner                      [signer, writable]
+  group_config               [writable]
+  agent_wallet               [writable, init]  PDA
+  intra_group_entry          [writable, init]  PDA  // type-0 whitelist seeded on the agent_wallet pubkey
+  agent_token_account        [writable, init]       // ATA owned by agent_wallet
+  mint                       []                     // SPL mint for the ATA
+  token_program              []
+  associated_token_program   []
   system_program
 
 Args:
@@ -149,23 +156,25 @@ Args:
 ```
 
 #### `execute_transfer`
-Called by the backend operator for every transfer and swap. Validates nonce, whitelist, and limits, then executes the SPL token transfer. Deducts protocol fee at execution time.
+Called by the backend operator for every direct token transfer. Validates nonce, whitelist, and limits, then executes the SPL token transfer. Deducts the protocol fee at execution time. Swaps and lending operations have their own instructions (`execute_swap`, `execute_lending_op`).
 
 ```
 Accounts:
-  backend_operator       [signer]
-  group_config           []
-  agent_wallet           [writable]   // limits + nonce updated here
-  from_token_account     [writable]   // agent vault ATA
-  to_token_account       [writable]   // recipient ATA (must exist)
-  whitelist_entry        []           // PDA must exist for recipient address
-  protocol_fee_token_acct [writable]  // Enclz protocol ATA
-  token_program          []
+  backend_operator         [signer]
+  group_config             []
+  group_owner              [writable]   // group_config.owner — receives rent when an external whitelist entry auto-voids
+  agent_wallet             [writable]   // limits + nonce updated here
+  from_token_account       [writable]   // agent vault ATA
+  to_token_account         [writable]   // recipient ATA (must exist)
+  whitelist_entry          [writable]   // PDA must exist for recipient address; mutated for type-1 amount_used and may be closed on auto-void
+  protocol_fee_token_acct  [writable]   // Enclz protocol ATA
+  token_program            []
   system_program
 
 Args:
   amount:          u64
   expected_nonce:  u64   // must match agent_wallet.operator_nonce
+  agent_index:     u8    // reconstructs the agent_wallet PDA seed for the SPL transfer CPI signer
 ```
 
 Enforcement (in order):
@@ -175,7 +184,7 @@ Enforcement (in order):
 4. Reject if `amount > per_tx_limit`
 5. Reject if `spent_today + amount > daily_limit`
 6. Reject if `tx_count_this_hour >= hourly_tx_cap`
-7. Verify `whitelist_entry` PDA exists for recipient address → reject `whitelist_violation` if missing
+7. The `whitelist_entry` PDA must exist for the recipient address — Anchor's seed constraint enforces this during account resolution. A missing PDA surfaces as Anchor's `AccountNotInitialized` (3012); the backend translates this to `whitelist_violation` for the REST response.
 8. If `whitelist_entry.entry_type == 1` (external recipient):
    a. Reject if `now > whitelist_entry.ttl_expires_at` → `whitelist_expired`
    b. Reject if `whitelist_entry.amount_used + amount > whitelist_entry.approved_amount` → `whitelist_amount_exhausted`
@@ -186,6 +195,75 @@ Enforcement (in order):
 11. Increment `spent_today` (by `amount`, not `net_amount` — fee counts against limit) and `tx_count_this_hour`
 12. If `whitelist_entry.entry_type == 1`: increment `whitelist_entry.amount_used` by `amount`
     - If `whitelist_entry.amount_used >= whitelist_entry.approved_amount`: close `whitelist_entry` PDA (auto-void, rent returned to owner)
+
+#### `execute_swap`
+Called by the backend operator for every swap routed through the whitelisted DEX aggregator. Authorisation rides on a `entry_type = 2` (protocol) `WhitelistEntry` keyed on the aggregator program ID, so the orchestrator can rotate router versions by editing the whitelist alone — no program redeploy. The handler deducts the protocol fee from the input mint **before** invoking the aggregator CPI; output mint is unknown to Enclz at signing time, which makes input-side fee the only deterministic option.
+
+```
+Accounts:
+  backend_operator         [signer]
+  group_config             []
+  agent_wallet             [writable]   // limits + nonce updated here
+  from_token_account       [writable]   // agent input ATA
+  to_token_account         [writable]   // agent output ATA (mint may differ from input)
+  whitelist_entry          []           // type-2 PDA keyed on jupiter_program.key()
+  protocol_fee_token_acct  [writable]   // Enclz protocol ATA on the input mint
+  jupiter_program          []           // swap aggregator program; authorised via whitelist_entry
+  token_program            []
+  system_program
+  // remaining_accounts: variable account list shaped by the route plan; passed to the aggregator CPI verbatim
+
+Args:
+  amount_in:           u64    // gross input — limit checks and fee math run on this
+  minimum_amount_out:  u64    // surfaced in IDL; aggregator enforces it inside route_data
+  expected_nonce:      u64
+  agent_index:         u8
+  route_data:          Vec<u8>   // raw aggregator instruction payload built by the backend
+```
+
+Enforcement order:
+1. `expected_nonce == agent_wallet.operator_nonce` → bump nonce.
+2. Roll `spent_today` / `tx_count_this_hour` if the relevant boundary has elapsed.
+3. Limit checks against `amount_in` (fee + net both count against the daily cap).
+4. Reject if `whitelist_entry.entry_type != 2` → `whitelist_violation`.
+5. Compute fee from `amount_in` (10 bps).
+6. Transfer fee from agent input ATA to protocol ATA (PDA-signed CPI).
+7. Invoke the aggregator program via CPI with `route_data` and `remaining_accounts`, signed by the agent_wallet PDA.
+8. Update counters; type-2 entries are uncapped, so no `amount_used` increment.
+
+#### `execute_lending_op`
+Unified deposit/withdraw against a whitelisted lending program. Backend dispatches `/v1/deposit` to `op_type = 0` and `/v1/withdraw` to `op_type = 1`; these discriminants are part of the on-chain ABI and are pinned in `lib.rs` tests.
+
+```
+Accounts:
+  backend_operator         [signer]
+  group_config             []
+  agent_wallet             [writable]
+  agent_token_account      [writable]   // agent ATA on the lending mint
+  whitelist_entry          []           // type-2 PDA keyed on lending_program.key()
+  protocol_fee_token_acct  [writable]   // Enclz protocol ATA on the same mint
+  lending_program          []           // authorised via whitelist_entry
+  token_program            []
+  system_program
+  // remaining_accounts: lending-program-specific account list passed verbatim to the CPI
+
+Args:
+  op_type:        u8         // 0 = deposit, 1 = withdraw
+  amount:         u64        // gross input — limit checks run on this
+  expected_nonce: u64
+  agent_index:    u8
+  cpi_data:       Vec<u8>    // raw lending-program instruction payload built by the backend
+```
+
+Enforcement order:
+1. `op_type ∈ {0, 1}` and `amount > 0`.
+2. Nonce check → bump.
+3. Counter rollover; limit checks against `amount`.
+4. Reject if `whitelist_entry.entry_type != 2`.
+5. Dispatch:
+   - `DEPOSIT`: transfer fee from agent ATA to protocol ATA, then invoke the lending CPI for the principal.
+   - `WITHDRAW`: snapshot agent ATA balance, invoke the lending CPI to redeem, reload the ATA, take the fee out of the realised delta. The agent keeps `redeemed - fee`.
+6. Update counters.
 
 #### `add_to_whitelist`
 Owner-only. Creates a `WhitelistEntry` PDA.
