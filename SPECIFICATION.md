@@ -68,6 +68,7 @@ owner:                Pubkey    // Orchestrator's Solana wallet (policy admin)
 backend_operator:     Pubkey    // backend's signing keypair (authorized caller)
 protocol_fee_wallet:  Pubkey    // Enclz protocol ATA receives fees
 agent_count:          u8
+group_name:           [u8; 32]  // human label for the group ("acme-trading-desk"); written verbatim, no on-chain validation
 ```
 
 #### `AgentWallet` PDA
@@ -128,6 +129,7 @@ Accounts:
   system_program
 
 Args:
+  group_name:           [u8; 32] // fixed-width human label, written verbatim (no on-chain validation)
   backend_operator:     Pubkey
   protocol_fee_wallet:  Pubkey   // Enclz's fee collection wallet
   dex_router:           Pubkey   // swap aggregator program ID; whitelisted as type-2
