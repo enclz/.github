@@ -8,9 +8,10 @@
 | Blockchain | Solana (devnet → mainnet-beta) |
 | On-chain security | Program-owned PDAs · whitelist PDAs · per-wallet operator nonce |
 | Backend | Node.js · JavaScript |
-| Web app | Eitherway (AI app builder · deployed on Eitherway platform) |
-| Wallet (Orchestrator) | Solflare SDK (`@solflare-wallet/sdk`) |
-| REST API (agents + orchestrator) | Express.js · Bearer token auth · webhook callbacks |
+| Web app | React 18 · Vite · Tailwind |
+| Wallet (Orchestrator) | Solana wallet adapter — Solflare adapter explicitly registered, others via Wallet Standard auto-detection |
+| Orchestrator auth | Sign-In-With-Solana (`supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })`) → Supabase JWT. Same ceremony for browser and Node. |
+| REST API (agents + orchestrator) | Fastify 4 · Bearer token auth (Supabase JWT for orchestrator, agent API key for agents) · webhook callbacks |
 | MCP Server | TypeScript · `@modelcontextprotocol/sdk` · stdio transport |
 | DEX aggregator | Jupiter API v6 |
 | RPC provider | QuickNode |
@@ -21,25 +22,25 @@
 
 ```mermaid
 graph TD
-    ORC["👤 Orchestrator (A2)\nbrowser (Solflare) or Orchestrator API"]
+    ORC["👤 Orchestrator (A2)\nbrowser (Solflare) or headless Node script\nboth use SIWS → Supabase JWT"]
     AGT["🤖 AI Agent (B2)\nREST API — Bearer token"]
     MCP_CLIENT["🤖 MCP Agent (B2)\nClaude · Cursor · any MCP runtime"]
 
-    WEB["🌐 Web App (Eitherway)\nSolflare SDK · group setup · whitelist config\nagent fleet dashboard · invite code generation"]
-    OAPI["Orchestrator REST API\nPOST /v1/orchestrator/* — group + agent provisioning"]
-    AAPI["Agent REST API\n/v1/* — transfer · swap · balance · simulate · webhooks"]
+    WEB["🌐 Web App (React + Vite)\nSolana wallet adapter · group setup · whitelist config\nagent fleet dashboard · invite code generation"]
+    OAPI["Orchestrator REST API (Fastify)\n4 credential-minting endpoints only:\nmint invite · rotate key · revoke · register fleet webhook"]
+    AAPI["Agent REST API (Fastify)\n/v1/* — transfer · swap · balance · simulate · webhooks"]
     MCP["MCP Server (TypeScript)\nstdio transport · 8 tools\nENCLZ_API_KEY auth"]
 
-    BE["⚙️ Backend Service (Node.js)\nAgentAuthService · OrchestratorAuthService\nRegistry · SolanaClient · JupiterClient\nWebhookDispatcher · PolicyEnforcer"]
+    BE["⚙️ Backend Service (Fastify · Node.js)\nresolveAgentFromKey · resolveUserFromJwt · requireGroupAccess\nSolana client · Jupiter client\nWebhook dispatcher · idempotency cache"]
 
     RPC["Solana RPC (QuickNode)"]
     JUP["Jupiter API"]
 
     CHAIN["🔗 Solana on-chain\nEnclz Program\nGroupConfig PDA · AgentWallet PDAs · WhitelistEntry PDAs"]
 
-    ORC -->|HTTPS| WEB
-    ORC -->|Orchestrator API key| OAPI
-    WEB -->|initialize_group · add_agent · add_to_whitelist| RPC
+    ORC -->|HTTPS · SIWS JWT| WEB
+    ORC -->|SIWS JWT (Node script)| OAPI
+    WEB -->|signed by orchestrator's wallet:\ninitialize_group · add_agent · add_to_whitelist\nrenew_whitelist_entry · remove_from_whitelist\nupdate_agent_limits · emergency_withdraw| RPC
     OAPI -->|validated request| BE
 
     AGT -->|Bearer token| AAPI
@@ -327,48 +328,34 @@ Owner-only. Rotates the authorized backend keypair.
 ### Module Structure
 
 ```
-src/
-  index.js                   // entry point, wires up HTTP server
-  api/
-    router.js                // mounts /v1/orchestrator/* and /v1/* agent endpoints
-    auth/
-      agent.js               // Bearer token middleware — validates API key, resolves agent
-      orchestrator.js        // Orchestrator API key middleware — resolves group owner
-    routes/
-      orchestrator/
-        groups.js            // POST /v1/orchestrator/groups
-        agents.js            // POST /v1/orchestrator/groups/:id/agents
-        whitelist.js         // POST/PATCH/DELETE /v1/orchestrator/groups/:id/whitelist[/:address]
-        limits.js            // PATCH /v1/orchestrator/groups/:id/agents/:aid/limits
-        revoke.js            // POST /v1/orchestrator/agents/:aid/revoke
-      agent/
-        register.js          // POST /v1/register
-        transfer.js          // POST /v1/transfer
-        swap.js              // POST /v1/swap
-        deposit.js           // POST /v1/deposit
-        withdraw.js          // POST /v1/withdraw
-        simulate.js          // POST /v1/intents/simulate
-        balance.js           // GET  /v1/balance
-        limits.js            // GET  /v1/limits
-        history.js           // GET  /v1/history
-        webhooks.js          // POST /v1/webhooks
-  registry/
-    index.js                 // CRUD for agent registry, credentials, invitations, webhooks
-    schema.js                // data model definitions
-  policy/
-    enforcer.js              // pre-flight limit checks mirroring on-chain logic
-    templates.js             // policy template definitions
-  clients/
-    solana.js                // @solana/web3.js wrapper (QuickNode RPC)
-    jupiter.js               // Jupiter Quote + Swap API wrapper
-    lending.js               // generic lending adapter (Kamino etc.)
-  webhooks/
-    dispatcher.js            // fires HMAC-signed events to registered callback URLs
-    events.js                // event type definitions and payload builders
-  monitor/
-    index.js                 // subscribes to agent wallet ATAs; dispatches incoming payment alerts
+server/
+  index.js                   // Fastify entry point — registers routes, force-instantiates Solana client at boot
+  routes/
+    agent.js                 // all /v1/* agent endpoints (register, transfer, swap, deposit, withdraw, simulate, balance, limits, history, webhooks)
+    orchestrator.js          // four credential-minting endpoints (see §"Orchestrator Endpoints")
+  lib/
+    auth.js                  // resolveAgentFromKey · resolveUserFromJwt · requireGroupAccess preHandler
+    db.js                    // getServiceClient() singleton (service-role, bypasses RLS); throws at module load if Supabase env vars are missing
+    solana.js                // cached getConnection() · getOperator() · getProgram()
+    intents.js               // executeTransfer · executeSwap · executeLendingOp (with one nonce-mismatch resync + retry)
+    jupiter.js               // Jupiter v6 quote + swap-instructions wrapper
+    onchain-fleet.js         // getGroupConfig · getAgentWallet · listAgentsForGroup · decodeFixed32
+    onchain-verify.js        // confirmTx · verifyAgentWallet · verifyWhitelistEntry (used by the agent-creation endpoint)
+    pda.js                   // groupConfigPda · agentWalletPda · whitelistEntryPda derivation
+    policy.js                // computeFee (10 bps) — only function called on the request path. TEMPLATES, applyTemplate, preflightCheck, anomalyCheck remain as helper exports for tests/tooling but are NOT invoked by route handlers.
+    webhooks.js              // dispatchWebhook (fire-and-forget HMAC-signed events, refuses redirects)
+    url-safety.js            // validateWebhookUrl (DNS rebinding protection)
+    idempotency.js           // reserveOrAwait → complete/release pattern; PK is (key, agent_wallet_pda)
+    anchor-errors.js         // façade re-exporting the program's 6000–6013 discriminants from shared/anchor-errors.js
+    crypto.js                // generateApiKey · hashSecret · verifySecret · generateInviteCode · signWebhookPayload
 
-mcp/                         // MCP server — separate package, client of Agent REST API
+src/                         // SPA — see §"Web App"
+  lib/
+    anchor-client.js         // useEnclzProgram() — wallet-bound Anchor Program for orchestrator on-chain mutations
+    onchain-fleet.js         // listAgentsForGroup · listWhitelistEntries · getGroupConfig · getAgentWallet (mirror of server/lib/onchain-fleet.js)
+    api.js                   // thin fetch wrapper attaching the Supabase JWT, used only for the four Fastify endpoints
+
+mcp/                         // MCP server — separate package, client of Agent REST API (NOT YET IMPLEMENTED)
   index.ts                   // entry point — creates MCP server, registers tools, starts stdio transport
   tools.ts                   // tool definitions: input schemas + handler functions
   client.ts                  // thin HTTP client wrapping Agent REST API (uses ENCLZ_API_URL + ENCLZ_API_KEY)
@@ -377,97 +364,59 @@ mcp/                         // MCP server — separate package, client of Agent
 
 ### Registry Data Model
 
+The chain is the source of truth for groups, agents, and whitelist entries — there are no mirror tables. The database holds only state the chain doesn't model: bcrypt-hashed credentials, one-time invitation codes, webhook subscribers, and the idempotency cache. All four surviving tables are keyed on base58 PDAs (text), not UUIDs, and have RLS enabled with no policies attached (service-role only).
+
 ```js
-// groups table
-{
-  id:                   string,   // uuid
-  group_config_pda:     string,   // GroupConfig PDA pubkey (base58)
-  owner_pubkey:         string,   // orchestrator's Solana wallet
-  orchestrator_key_hash: string,  // bcrypt hash of orchestrator API key
-  created_at:           Date,
-}
-
-// agents table
-{
-  id:                  string,   // uuid
-  group_id:            string,   // FK → groups.id
-  agent_wallet_pda:    string,   // AgentWallet PDA pubkey (base58)
-  display_name:        string,
-  operator_nonce:      number,   // mirror of on-chain nonce for pre-flight checks
-  created_at:          Date,
-}
-
 // agent_credentials table
 {
-  id:            string,   // uuid
-  agent_id:      string,   // FK → agents.id
-  api_key_hash:  string,   // bcrypt hash — plaintext never stored
-  revoked:       boolean,
-  created_at:    Date,
-  revoked_at:    Date | null,
+  agent_wallet_pda:  string,   // base58 — primary identifier
+  api_key_hash:      string,   // bcrypt hash — plaintext never stored
+  revoked:           boolean,
+  created_at:        Date,
+  revoked_at:        Date | null,
 }
 
 // agent_invitations table
 {
-  id:          string,   // uuid
-  agent_id:    string,   // FK → agents.id (pre-created, unactivated)
-  code_hash:   string,   // hash of invitation code — plaintext never stored
-  used:        boolean,
-  expires_at:  Date,     // 24 hours from creation
-  created_at:  Date,
+  agent_wallet_pda:  string,   // base58 — primary identifier (the on-chain agent already exists at invite time)
+  code_hash:         string,   // hash of invitation code — plaintext never stored
+  used:              boolean,
+  expires_at:        Date,     // 24 hours from creation
+  created_at:        Date,
 }
 
 // agent_webhooks table
 {
-  id:           string,   // uuid
-  agent_id:     string,   // FK → agents.id — null for fleet-level orchestrator webhook
-  group_id:     string,   // FK → groups.id — set for fleet-level webhooks
-  url:          string,   // HTTPS callback URL
-  secret:       string,   // HMAC signing secret for payload verification
-  event_types:  string[], // e.g. ["transfer.confirmed","policy.limit_threshold"]
-  active:       boolean,
-  created_at:   Date,
+  id:                string,   // uuid
+  group_config_pda:  string,   // base58 — set for every row
+  agent_wallet_pda:  string,   // base58 — null for fleet-level orchestrator webhooks
+  url:               string,   // HTTPS callback URL
+  secret:            string,   // HMAC signing secret for payload verification
+  event_types:       string[], // e.g. ["transfer.confirmed","policy.limit_threshold"]
+  active:            boolean,
+  created_at:        Date,
 }
 
-// whitelist_entries table  (mirrors on-chain WhitelistEntry PDAs; source of truth is on-chain)
+// idempotency_cache table  (PK: (key, agent_wallet_pda))
 {
-  id:               string,   // uuid
-  group_id:         string,   // FK → groups.id
-  address:          string,   // base58 Solana address
-  label:            string,
-  entry_type:       number,   // 0 = intra-group, 1 = external, 2 = protocol
-  ttl_expires_at:   Date | null,
-  approved_amount:  number | null,  // USDC
-  amount_used:      number,         // updated after every successful transfer
-  voided:           boolean,        // true when amount_used >= approved_amount (entry closed on-chain)
-  created_at:       Date,
-}
-
-// idempotency_cache table
-{
-  key:        string,   // idempotency_key from request
-  agent_id:   string,   // FK → agents.id
-  response:   json,     // cached response body
-  created_at: Date,     // expire after 24h
+  key:               string,   // idempotency_key from request
+  agent_wallet_pda:  string,   // base58
+  status:            string,   // 'in_flight' | 'completed'
+  response:          json,     // cached response body — populated when status = 'completed'
+  created_at:        Date,
+  expires_at:        Date,     // 24h after creation; cleanup_idempotency_cache() drops stale rows
 }
 ```
 
-### Policy Enforcer
+There is no `groups`, `agents`, or `whitelist_entries` table. The SPA enumerates fleet metadata via Anchor account fetchers (`program.account.agentWallet.all` filtered by `memcmp` on the `group` field; `program.account.whitelistEntry.all` filtered on `added_by`) — see `src/lib/onchain-fleet.js`. The backend reads the same accounts on demand via `server/lib/onchain-fleet.js`.
 
-Pre-flight checks mirror on-chain logic. Runs before every transfer/swap submission to avoid wasting compute fees on transactions that will fail on-chain.
+### Policy Enforcement
 
-```js
-// policy/enforcer.js
-function preflightCheck(agent, amount) {
-  // load current state from registry (mirrors on-chain)
-  if (amount > agent.per_tx_limit) throw PolicyError('per_tx_limit_exceeded');
-  if (agent.spent_today + amount > agent.daily_limit) throw PolicyError('daily_limit_exceeded');
-  if (agent.tx_count_this_hour >= agent.hourly_tx_cap) throw PolicyError('hourly_cap_exceeded');
-  if (!isWhitelisted(group, recipient)) throw PolicyError('whitelist_violation');
-}
-```
+Limits and whitelist enforcement live exclusively on-chain. The backend does NOT run a server-side preflight on the request path — it submits the Anchor instruction directly and surfaces the program's custom error codes (6000–6013) as HTTP errors via `parseAnchorError`. The chain is the only authority; mirroring the rules in JavaScript was a source of drift, so it was removed.
 
-The on-chain program is the authoritative enforcer — pre-flight only reduces latency and avoids failed transactions.
+`server/lib/policy.js` exports `computeFee` (10 bps protocol fee) — the only function called on the request path. `TEMPLATES`, `applyTemplate`, `preflightCheck`, and `anomalyCheck` are kept as helper exports for tests and tooling but are NOT invoked by route handlers. Anomaly events (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, etc.) require these helpers to be re-attached to the post-execution path; until then those webhooks do not fire.
+
+After a confirmed `execute_transfer` / `execute_swap` / `execute_lending_op`, the backend re-fetches the on-chain `AgentWallet` account to populate `daily_remaining` / `hourly_tx_remaining` in the response — there is no JS mirror to read.
 
 ### Policy Templates
 
@@ -497,48 +446,43 @@ const TEMPLATES = {
 For every agent intent (transfer / swap / deposit / withdraw):
 
 ```
-authenticate(api_key)
-  → resolve agent from registry
-  → reject if revoked
+resolveAgentFromKey(api_key)
+  → bcrypt-match against agent_credentials.api_key_hash
+  → fetch on-chain AgentWallet + GroupConfig (chain is the source of truth)
+  → reject 401 if revoked
 
-check idempotency_key
-  → if cached: return cached response
-
-preflightCheck(agent, amount, recipient)
-  → PolicyError → 403 with structured error code
+idempotency.reserveOrAwait(key, agent_wallet_pda)
+  → INSERT … ON CONFLICT DO NOTHING into idempotency_cache
+  → if loser of race: poll until winner publishes the response
+  → if cached completed row: return cached response
 
 if transfer:
   validate recipient is base58
-  build_transfer_tx(agent_wallet, to_address, amount, token)
+  buildExecuteTransferIx(agent, recipient, amount, token)
 
 if swap:
-  fetch_jupiter_quote(from_token, to_token, amount)
-  build_swap_tx(quote)
+  fetchJupiterQuote(from_token, to_token, amount)
+  fetchJupiterSwapInstructions(...)
+  extract swapInstruction.data → routeData (Buffer)
+  buildExecuteSwapIx(agent, amount_in, min_out, route_data)
 
-if deposit:
-  resolve_lending_protocol(protocol?)
-  build_deposit_tx(lending_client, agent_wallet, token, amount)
+if deposit / withdraw:
+  validate `lending_program` is whitelisted (entry_type = 2) for the agent's group
+  buildExecuteLendingOpIx(agent, op_type, amount, lending_program, cpi_data)
 
-if withdraw:
-  resolve_lending_protocol(protocol?)
-  build_withdraw_tx(lending_client, agent_wallet, token, amount)
+submit_tx(signed by operator keypair)
+  → on NonceMismatch (6006): resolveNonceMismatch (one resync + retry)
+  → on other Anchor errors (6000–6013): parseAnchorError → HTTP 403 with structured code
+  → on RPC submission failure: 503 with retry_after
 
-sign_tx(operator_keypair, tx)
+re-fetch AgentWallet on-chain → populate daily_remaining / hourly_tx_remaining in response
 
-submit_tx(signed_tx)
-  → Solana RPC sendTransaction
+idempotency.complete(key, agent_wallet_pda, response)
 
-cache_idempotency_response(key, response)
-
-dispatch_webhook(agent, 'transfer.confirmed', { tx_sig, amount, to, memo, task_id })
-
-check_anomaly_thresholds(agent, whitelist_entry)
-  → if spent_today >= 0.8 * daily_limit: dispatch_fleet_webhook('policy.limit_threshold')
-  → if whitelist_entry.entry_type == 1 AND whitelist_entry.amount_used >= 0.8 * whitelist_entry.approved_amount:
-      dispatch_fleet_webhook('policy.whitelist_amount_threshold')
-  → if whitelist_entry.entry_type == 1 AND whitelist_entry.amount_used >= whitelist_entry.approved_amount:
-      dispatch_fleet_webhook('policy.whitelist_voided')
+dispatchWebhook(agent_wallet_pda, 'transfer.confirmed' | 'swap.confirmed', payload)
 ```
+
+Anomaly thresholds (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, `policy.limit_exceeded_attempt`, `policy.whitelist_violation`, `policy.whitelist_expiring`) and the `payment.received` webhook are not yet wired on the request path. They require, respectively, calling `anomalyCheck` after re-fetching on-chain state, hooking the Anchor error path for rejection events, a scheduled job for TTL-expiring alerts, and a wallet monitor (`onAccountChange` subscriptions to every agent ATA).
 
 ### Wallet Monitor
 
@@ -570,145 +514,99 @@ Scoped API key issued at registration. Never stored in plaintext. Resolves to `a
 
 All `/v1/orchestrator/*` endpoints require:
 ```
-Authorization: Bearer <orchestrator_api_key>
+Authorization: Bearer <supabase_jwt>
 ```
 
-Separate credential tier issued at group creation. Resolves to `group_id` + owner identity.
+The JWT is issued by `supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })` — the same Sign-In-With-Solana ceremony used by the browser SPA and headless Node scripts. There is no separate orchestrator API key.
+
+`requireGroupAccess` preHandler:
+1. Validates the JWT via `db.auth.getUser(token)` (5-minute in-memory cache).
+2. Extracts the wallet pubkey from `user.user_metadata.custom_claims.address` / `user.user_metadata.address`.
+3. Computes `groupConfigPda(walletPubkey).toBase58()` and compares it to the URL's `:group_config_pda` param.
+4. Rejects 403 on mismatch, 401 on malformed pubkey claim.
+
+There is no database join for ownership — the chain's PDA derivation IS the proof.
 
 ---
 
 ### Orchestrator Endpoints
 
-#### `POST /v1/orchestrator/groups`
+The orchestrator REST surface is intentionally minimal: only credential-minting endpoints. Every other orchestrator action — creating a group, creating an agent on-chain, adding/renewing/removing whitelist entries, updating per-agent limits, emergency withdraw, rotating the backend operator — is performed by the orchestrator's wallet signing the corresponding Anchor instruction directly (Solflare in the browser, raw keypair in a Node script). The chain account is the persisted state; there is no mirror row to write.
 
-Create a new group on-chain and in the registry. Backend signs the `initialize_group` instruction using the configured operator keypair; the orchestrator's Solana pubkey is recorded as owner.
+URL path params:
+- `:group_config_pda` — base58 `GroupConfig` PDA (every owner has exactly one group, since the PDA is `["group", owner_pubkey]`).
+- `:agent_wallet_pda` — base58 `AgentWallet` PDA.
 
-```js
-// Request
-{
-  "owner_pubkey":  "string",   // orchestrator's Solana wallet (base58)
-  "group_name":    "string"
-}
+#### `POST /v1/orchestrator/groups/:group_config_pda/agents`
 
-// Response 200
-{
-  "group_id":            "string",
-  "group_config_pda":    "string",
-  "orchestrator_api_key": "string"   // shown once — store immediately
-}
-```
-
-#### `POST /v1/orchestrator/groups/:group_id/agents`
-
-Add an agent to a group. Creates `AgentWallet` PDA on-chain and returns a one-time invitation code.
+Mint a one-time invitation code for an agent the orchestrator has just created on-chain. The orchestrator's wallet must have already signed and confirmed `add_agent`; this endpoint verifies the resulting `AgentWallet` PDA belongs to the route's group, then issues the invitation.
 
 ```js
 // Request
 {
-  "display_name":   "string",
-  "template":       "string",   // "research-agent" | "micro-payment-agent" | "payment-agent" | "custom"
-  "per_tx_limit":   number,     // optional override (USDC)
-  "daily_limit":    number,     // optional override
-  "hourly_tx_cap":  number      // optional override
+  "tx_sig":           "string",   // confirmed signature of the add_agent instruction
+  "agent_wallet_pda": "string"    // base58
 }
 
 // Response 200
 {
-  "agent_id":         "string",
   "agent_wallet_pda": "string",
   "invitation_code":  "string"   // one-time, expires 24h, shown once
 }
+
+// Response 400
+{ "error": "onchain_mismatch", "message": "agent_wallet_pda does not belong to :group_config_pda" }
 ```
 
-#### `PATCH /v1/orchestrator/groups/:group_id/agents/:agent_id/limits`
+#### `POST /v1/orchestrator/groups/:group_config_pda/agents/:agent_wallet_pda/rotate-key`
 
-Update spend limits for an existing agent.
+Issue a new invitation code for an existing agent (e.g., after a suspected key compromise). Atomically revokes any prior credential and mints a fresh code.
+
+```js
+// Response 200
+{ "agent_wallet_pda": "string", "invitation_code": "string" }
+```
+
+#### `POST /v1/orchestrator/groups/:group_config_pda/agents/:agent_wallet_pda/revoke`
+
+Revoke the agent's API key immediately without minting a replacement.
+
+```js
+// Response 200
+{ "agent_wallet_pda": "string", "revoked": true }
+```
+
+After revocation, the orchestrator calls `rotate-key` (above) when ready to re-issue.
+
+#### `POST /v1/orchestrator/groups/:group_config_pda/webhooks`
+
+Register a fleet-level webhook for policy events across all agents in the group.
 
 ```js
 // Request
 {
-  "per_tx_limit":  number,   // optional
-  "daily_limit":   number,   // optional
-  "hourly_tx_cap": number    // optional
-}
-
-// Response 200
-{ "agent_id": "string", "updated": true }
-```
-
-#### `POST /v1/orchestrator/groups/:group_id/whitelist`
-
-Add an address to the group whitelist.
-
-```js
-// Request
-{
-  "address":          "string",               // base58 Solana address
-  "label":            "string",
-  "entry_type":       "external" | "protocol", // "external" = TTL + amount-capped; "protocol" = permanent
-  "ttl_seconds":      number,                 // required for entry_type "external" (e.g. 2592000 = 30 days)
-  "approved_amount":  number                  // required for entry_type "external" (USDC; e.g. 50.00)
-}
-
-// Response 200
-{
-  "whitelist_entry_pda": "string",
-  "ttl_expires_at":      number,   // Unix timestamp; null for protocol entries
-  "approved_amount":     number    // null for protocol entries
-}
-```
-
-#### `PATCH /v1/orchestrator/groups/:group_id/whitelist/:address`
-
-Renew TTL or top up approved amount for an existing external whitelist entry. Cannot be called on intra-group or protocol entries.
-
-```js
-// Request (all fields optional; at least one required)
-{
-  "ttl_seconds":      number,   // new TTL from now (e.g. 2592000 = another 30 days)
-  "approved_amount":  number    // new total cap; must be >= current amount_used
-}
-
-// Response 200
-{
-  "address":          "string",
-  "ttl_expires_at":   number,
-  "approved_amount":  number,
-  "amount_used":      number,
-  "amount_remaining": number
-}
-```
-
-#### `DELETE /v1/orchestrator/groups/:group_id/whitelist/:address`
-
-Remove address from whitelist. Closes the on-chain PDA. Cannot remove intra-group entries. Returns `204`.
-
-#### `POST /v1/orchestrator/agents/:agent_id/revoke`
-
-Revoke agent's API key immediately.
-
-```js
-// Response 200
-{ "agent_id": "string", "revoked": true }
-```
-
-After revocation, orchestrator calls `POST /v1/orchestrator/groups/:id/agents` again to issue a new invitation code.
-
-#### `POST /v1/orchestrator/webhooks`
-
-Register a fleet-level webhook for policy events across all agents in a group.
-
-```js
-// Request
-{
-  "group_id":    "string",
-  "url":         "string",   // must be HTTPS
-  "event_types": ["string"]  // ["policy.limit_threshold","policy.limit_exceeded_attempt","policy.whitelist_violation"]
+  "url":         "string",   // must be HTTPS — validateWebhookUrl rejects loopback / RFC1918 / link-local / etc.
+  "event_types": ["string"]  // ["policy.limit_threshold","policy.limit_exceeded_attempt","policy.whitelist_violation","policy.whitelist_expiring","policy.whitelist_amount_threshold","policy.whitelist_voided"]
 }
 
 // Response 200
 { "webhook_id": "string", "signing_secret": "string" }  // signing_secret shown once
 ```
+
+#### Orchestrator actions performed on-chain (no REST endpoint)
+
+| Action | Anchor instruction | Signed by |
+|---|---|---|
+| Create group | `initialize_group(group_name, backend_operator, protocol_fee_wallet, dex_router)` | orchestrator's wallet |
+| Create agent | `add_agent(display_name, daily_limit?, per_tx_limit?, hourly_tx_cap?)` | orchestrator's wallet |
+| Update per-agent limits | `update_agent_limits(daily_limit?, per_tx_limit?, hourly_tx_cap?)` | orchestrator's wallet |
+| Add whitelist entry | `add_to_whitelist(target, label, entry_type, ttl_expires_at, approved_amount)` | orchestrator's wallet |
+| Renew whitelist entry | `renew_whitelist_entry(target, ttl_expires_at, approved_amount)` | orchestrator's wallet |
+| Remove whitelist entry | `remove_from_whitelist(target)` | orchestrator's wallet |
+| Emergency withdraw | `emergency_withdraw(destination)` | orchestrator's wallet |
+| Rotate backend operator | `update_backend_operator(new_operator)` | orchestrator's wallet |
+
+These are signed via `useEnclzProgram()` in the SPA (`src/lib/anchor-client.js`) or via the equivalent Anchor `Program` constructor in a Node script. After `confirmed`, the dashboard re-fetches via `listAgentsForGroup` / `listWhitelistEntries`. The agent-creation flow is the only one that follows up with a backend POST (to mint the invitation code).
 
 ---
 
@@ -723,7 +621,7 @@ Exchange one-time invitation code for an API key. Code invalidated immediately a
 { "invitation_code": "string" }
 
 // Response 200
-{ "agent_id": "string", "api_key": "string" }   // api_key shown once
+{ "agent_wallet_pda": "string", "api_key": "string" }   // api_key shown once
 
 // Response 400
 { "error": "invalid_invitation_code", "message": "Code expired, already used, or not found." }
@@ -797,55 +695,63 @@ Swap tokens via the whitelisted Jupiter router. Swap router is whitelisted at gr
 
 Deposit tokens into a whitelisted lending protocol.
 
+> **Current shape (pass-through CPI).** The backend does not yet wrap a Kamino/Save adapter, so the agent supplies the lending program's pubkey AND the prebuilt CPI instruction bytes. The backend validates the lending program is whitelisted (`entry_type = 2`) for the agent's group and submits `execute_lending_op(0, ...)` to the Enclz program, which CPI-invokes the lending program with `cpi_data`. The "no SDK / no crypto knowledge required" promise lands when a backend adapter is added (see deferred work).
+
 ```js
 // Request
 {
-  "token":            "string",
+  "lending_program":  "string",   // base58 — must be whitelisted entry_type = 2 for this agent's group
   "amount":           number,
-  "protocol":         "string",   // optional label — uses first available if omitted
-  "task_id":          "string",
-  "idempotency_key":  "string"
+  "cpi_data":         "string",   // base64-encoded CPI instruction bytes for the lending program
+  "task_id":          "string",   // optional
+  "idempotency_key":  "string"    // optional
 }
 
 // Response 200
 {
-  "tx_sig":           "string",
-  "status":           "confirmed",
-  "protocol":         "string",
-  "deposited_amount": number,
-  "current_apy":      number
+  "tx_sig":               "string",
+  "status":               "confirmed",
+  "lending_program":      "string",
+  "deposited_amount":     number,
+  "daily_remaining":      number,
+  "hourly_tx_remaining":  number
 }
 
 // Response 403
-{ "error": "no_whitelisted_protocol" | "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded" }
+{ "error": "whitelist_violation" | "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded" }
 ```
+
+`current_apy` is not yet populated (no APY oracle wired); will be added when a backend adapter lands.
 
 #### `POST /v1/withdraw`
 
-Withdraw tokens from a whitelisted lending protocol.
+Withdraw tokens from a whitelisted lending protocol. Same pass-through CPI shape as deposit.
 
 ```js
 // Request
 {
-  "token":            "string",
+  "lending_program":  "string",
   "amount":           number,
-  "protocol":         "string",   // optional
+  "cpi_data":         "string",   // base64-encoded CPI instruction bytes
   "task_id":          "string",
   "idempotency_key":  "string"
 }
 
 // Response 200
 {
-  "tx_sig":          "string",
-  "status":          "confirmed",
-  "protocol":        "string",
-  "received_amount": number,
-  "yield_earned":    number
+  "tx_sig":               "string",
+  "status":               "confirmed",
+  "lending_program":      "string",
+  "received_amount":      number,
+  "daily_remaining":      number,
+  "hourly_tx_remaining":  number
 }
 
 // Response 403
-{ "error": "no_whitelisted_protocol" | "insufficient_deposit_balance" }
+{ "error": "whitelist_violation" | "insufficient_balance" }
 ```
+
+`yield_earned` is not yet populated (no yield-tracking wired); will be added with the backend adapter.
 
 #### `POST /v1/intents/simulate`
 
@@ -954,13 +860,13 @@ Register callback URL for async transaction confirmations and policy events for 
 
 ### Webhook Event Payloads
 
-All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
+All webhook requests are signed with `X-Enclavez-Signature: sha256=<hmac>`.
 
 ```js
 // transfer.confirmed
 {
   "event":    "transfer.confirmed",
-  "agent_id": "string",
+  "agent_wallet_pda": "string",
   "tx_sig":   "string",
   "amount":   number,
   "net_amount": number,
@@ -973,7 +879,7 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // payment.received
 {
   "event":    "payment.received",
-  "agent_id": "string",
+  "agent_wallet_pda": "string",
   "amount":   number,
   "token":    "string",
   "timestamp": number
@@ -982,7 +888,7 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.limit_threshold  (80% of daily limit reached)
 {
   "event":           "policy.limit_threshold",
-  "agent_id":        "string",
+  "agent_wallet_pda": "string",
   "daily_limit":     number,
   "daily_spent":     number,
   "daily_remaining": number,
@@ -992,7 +898,7 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.limit_exceeded_attempt
 {
   "event":     "policy.limit_exceeded_attempt",
-  "agent_id":  "string",
+  "agent_wallet_pda": "string",
   "attempted_amount": number,
   "reason":    "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded",
   "timestamp": number
@@ -1001,7 +907,7 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.whitelist_violation
 {
   "event":              "policy.whitelist_violation",
-  "agent_id":           "string",
+  "agent_wallet_pda": "string",
   "attempted_recipient": "string",
   "timestamp":          number
 }
@@ -1009,7 +915,7 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.whitelist_expiring  (fired once, 24h before TTL expiry)
 {
   "event":           "policy.whitelist_expiring",
-  "group_id":        "string",
+  "group_config_pda": "string",
   "address":         "string",
   "label":           "string",
   "ttl_expires_at":  number,
@@ -1020,8 +926,8 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.whitelist_amount_threshold  (fired when 80% of approved_amount consumed)
 {
   "event":            "policy.whitelist_amount_threshold",
-  "group_id":         "string",
-  "agent_id":         "string",
+  "group_config_pda": "string",
+  "agent_wallet_pda": "string",
   "address":          "string",
   "label":            "string",
   "approved_amount":  number,
@@ -1033,8 +939,8 @@ All webhook requests are signed with `X-Enclz-Signature: sha256=<hmac>`.
 // policy.whitelist_voided  (fired when approved_amount fully consumed and entry auto-closed)
 {
   "event":           "policy.whitelist_voided",
-  "group_id":        "string",
-  "agent_id":        "string",
+  "group_config_pda": "string",
+  "agent_wallet_pda": "string",
   "address":         "string",
   "label":           "string",
   "approved_amount": number,
@@ -1083,7 +989,7 @@ HTTP status codes: `400` bad request, `401` unauthorized, `403` policy violation
 
 OpenAPI 3.1 spec covering all agent REST endpoints (`/v1/*`). Generated from route definitions and kept in sync. Consumed by API clients, Postman, and AI code assistants.
 
-Location: `docs2/openapi.json`
+Location: `docs/openapi.json`
 
 ### `AGENT_SKILL.md`
 
@@ -1097,7 +1003,7 @@ Markdown file designed for injection into agent system prompts or context window
 
 Compatible with LangChain tool context injection, AutoGen skill description blocks, and plain system-prompt augmentation. No SDK required — agents call the REST API directly using any HTTP client.
 
-Location: `docs2/AGENT_SKILL.md`
+Location: `docs/AGENT_SKILL.md`
 
 ### MCP Server
 
@@ -1184,22 +1090,24 @@ Useful for explorers, auditors, and integrators who prefer to verify the IDL aga
 ## Web App
 
 ### Stack
-Built on **Eitherway** (AI app builder, deployed on Eitherway platform). Solflare SDK for orchestrator wallet connection and on-chain transaction signing. All on-chain interactions go through QuickNode RPC.
+React 18 + Vite + Tailwind. Solana Wallet Adapter for orchestrator wallet connection (Solflare adapter explicitly registered, others via Wallet Standard auto-detection). Sign-In-With-Solana via `supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })` produces the Supabase JWT used to authorize backend calls. On-chain mutations are signed via `useEnclzProgram()` (`src/lib/anchor-client.js`) — a wallet-bound `Program<Enclz>` constructed from `@enclz/sdk`'s IDL. Live on-chain reads use a single `Connection` configured against QuickNode (RPC + WSS).
 
 ### Routes
 
+The `:id` route param is the **base58 `group_config_pda`** (every owner has exactly one group, since the PDA is `["group", owner_pubkey]`); `:agentId` is the agent's `agent_wallet_pda`.
+
 ```
-/                                   landing — no wallet required; product overview, live devnet demo, policy template previews
-/demo                               interactive demo — browse a read-only example fleet dashboard without connecting wallet
-/connect                            wallet connection entry point (redirected here from any authenticated route)
-/setup                              group setup wizard (wallet required from Step 2 onward)
-/group/:id                          fleet dashboard (agents, spend overview, anomaly feed)
-/group/:id/agents                   agent list — status, daily spend, hourly rate, headroom
-/group/:id/agents/new               add agent — template selection, limit config, invite code
-/group/:id/agents/:aid              per-agent detail — audit log, policy, revoke/re-invite
-/group/:id/whitelist                manage approved addresses — TTL/amount per external entry, renew/top-up actions
-/group/:id/whitelist/new            add external address — set label, TTL, approved amount
-/group/:id/settings                 orchestrator API key, fleet webhook config
+/                                              landing — no wallet required; product overview, live devnet demo, policy template previews
+/demo                                          interactive demo — browse a read-only example fleet dashboard without connecting wallet
+/connect                                       wallet connection entry point (redirected here from any authenticated route)
+/setup                                         group setup wizard (wallet required from Step 2 onward)
+/group/:group_config_pda                       fleet dashboard (agents, spend overview, anomaly feed)
+/group/:group_config_pda/agents                agent list — status, daily spend, hourly rate, headroom
+/group/:group_config_pda/agents/new            add agent — template selection, limit config, invite code
+/group/:group_config_pda/agents/:agent_wallet_pda   per-agent detail — audit log, policy, revoke/re-invite
+/group/:group_config_pda/whitelist             manage approved addresses — TTL/amount per external entry, renew/top-up actions
+/group/:group_config_pda/whitelist/new         add external address — set label, TTL, approved amount
+/group/:group_config_pda/settings              fleet webhook config
 ```
 
 ### Group Setup Wizard
@@ -1209,36 +1117,38 @@ Step 1: Preview (no wallet)
         → landing page shows product value, live devnet demo, template examples
         → "Create Group" CTA advances to Step 2 and prompts wallet connection
 
-Step 2: Connect Solflare wallet
-        → wallet.connect() via @solflare-wallet/sdk
-        → orchestrator pubkey becomes group owner
+Step 2: Connect Solana wallet (Solflare or any Wallet Standard wallet)
+        → user picks a wallet from the modal; Solflare is auto-promoted to the top
+        → SPA calls supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })
+        → wallet signs the SIWS message; Supabase issues a JWT
         → on failure: error banner with retry button; no state written
 
 Step 3: Configure group
         → set group name
-        → web app signs + sends initialize_group instruction
+        → SPA calls program.methods.initializeGroup(group_name, backend_operator, protocol_fee_wallet, dex_router) via useEnclzProgram() (signed by the orchestrator's wallet)
         → on chain failure: error banner with retry; PDA either created or not (idempotent)
 
 Step 4: Add first agent
         → orchestrator enters display name, selects policy template
-        → web app signs + sends add_agent instruction
+        → SPA calls program.methods.addAgent(...) via useEnclzProgram() (signed by the orchestrator's wallet)
+        → after `confirmed`, SPA POSTs {tx_sig, agent_wallet_pda} to /v1/orchestrator/groups/:group_config_pda/agents to mint the invitation code
         → on chain failure: error banner with retry
         → system displays one-time invitation code
 
 Step 5: Configure whitelist
-        → DEX router auto-whitelisted (entry_type 2, permanent)
-        → orchestrator adds external service addresses: label + TTL (days) + approved amount (USDC)
-        → intra-group agent entry already present from Step 4 (entry_type 0, permanent)
+        → DEX router auto-whitelisted (entry_type 2, permanent) at Step 3 via initialize_group's dex_router argument
+        → orchestrator adds external service addresses: label + TTL (days) + approved amount (USDC) — signed via useEnclzProgram()
+        → intra-group agent entry already present from Step 4 (entry_type 0, permanent, auto-added by add_agent)
 ```
 
 ---
 
 ## External Integrations
 
-### Solflare SDK
-Package: `@solflare-wallet/sdk`
-Used by: Web app for orchestrator wallet connection and on-chain signing.
-Key calls: `wallet.connect()`, `wallet.signAndSendTransaction(tx)`, `wallet.disconnect()`
+### Solana Wallet Adapter
+Package: `@solana/wallet-adapter-react` + `@solana/wallet-adapter-react-ui` + `@solana/wallet-adapter-wallets`.
+Used by: Web app for wallet connection and on-chain signing. `WalletProviders` wraps the app with `ConnectionProvider` (QuickNode RPC + WSS) and `WalletProvider` (Solflare adapter explicitly registered, others via Wallet Standard auto-detection).
+The `useEnclzProgram()` hook (`src/lib/anchor-client.js`) returns a `Program<Enclz>` whose provider's wallet is the connected adapter — used to sign every on-chain orchestrator mutation.
 
 ### Jupiter API
 Base URL: `https://quote-api.jup.ag/v6`

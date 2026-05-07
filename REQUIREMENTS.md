@@ -26,7 +26,7 @@ Developer or researcher running one or more autonomous AI agents.
 - Agents perform real work: research, content, task coordination, API orchestration, on-chain workflows
 - Agents need to pay for things: API calls, micro-services, contractor bounties, tipping
 - Primary fear: agent hallucinates a large transfer, prompt injection drains wallet, or agent config is exfiltrated exposing a private key
-- Manages the fleet from a web dashboard or via the orchestrator REST API
+- Manages the fleet from a web dashboard or, for headless setups, from a Node script that performs the same Sign-In-With-Solana ceremony and signs on-chain mutations with a local keypair
 
 ### AI Agent (Person B2)
 
@@ -44,7 +44,8 @@ Autonomous software process, not a human.
 | Channel | Who uses it | Purpose |
 |---|---|---|
 | **Web App** | Orchestrator (A2) | Group setup, agent provisioning, whitelist management, policy config, fleet dashboard, audit log |
-| **Orchestrator REST API** | Orchestrator (A2) | Programmatic agent provisioning — create groups, add agents, configure policies, issue invite codes |
+| **Orchestrator on-chain mutations** | Orchestrator (A2) | Group creation, whitelist add/renew/remove, agent creation, per-agent limit updates — signed by the orchestrator's Solana wallet (Solflare in the browser; raw keypair in a Node script). Authenticated by Sign-In-With-Solana, no separate API key. |
+| **Orchestrator REST API** | Orchestrator (A2) | Four credential-minting endpoints only: invite-code issuance, agent API key rotation/revocation, fleet webhook registration. All other orchestrator actions go on-chain. |
 | **Agent REST API** | AI Agent (B2) | Transfer, swap, deposit, withdraw, balance/limit queries, webhook registration, simulation |
 | **MCP Server** | AI Agent (B2) | Native tool integration for MCP-enabled runtimes (Claude, Cursor, any MCP client) — same operations as Agent REST API, zero HTTP client code required |
 
@@ -56,7 +57,7 @@ Each agent gets a dedicated wallet on Solana. The wallet is governed by a spend 
 
 External addresses are whitelisted with a **TTL** (expiry timestamp) and an **approved amount cap**. Once the full approved amount is transferred to an address, the whitelist entry is automatically voided on-chain — the orchestrator must explicitly re-approve it. Intra-group agent addresses and protocol addresses (DEX router, lending pools) are permanent and unlimited.
 
-The orchestrator controls group setup and policy via the web app or orchestrator API. The agent interacts only through the agent REST API using a scoped API key — no private key, no signing, no crypto knowledge required.
+The orchestrator controls group setup and policy by signing on-chain instructions directly — from the web app via Solflare, or from a Node script holding a local keypair. Both paths use Sign-In-With-Solana for backend auth. The agent interacts only through the agent REST API using a scoped API key — no private key, no signing, no crypto knowledge required.
 
 ---
 
@@ -64,7 +65,7 @@ The orchestrator controls group setup and policy via the web app or orchestrator
 
 ### Flow A — Group Setup
 
-1. Orchestrator opens the web app (no wallet required to browse or preview) and connects their Solana wallet, OR calls `POST /v1/orchestrator/groups` via the orchestrator API
+1. Orchestrator opens the web app (no wallet required to browse or preview) and connects their Solana wallet (browser via Solflare, or headless via a Node script that holds an Ed25519 keypair). Both paths perform Sign-In-With-Solana to obtain a Supabase JWT, then sign the on-chain `initialize_group` instruction directly — there is no separate "orchestrator API" call to provision a group.
 2. A `GroupConfig` is recorded on-chain. If the on-chain instruction fails, the web app shows an error with a retry button — no partial state is persisted.
 3. Orchestrator adds agent members — each gets a dedicated wallet PDA on-chain
 4. Orchestrator configures per-agent policy: whitelist of approved service endpoints, per-tx/daily/hourly limits
@@ -73,8 +74,8 @@ The orchestrator controls group setup and policy via the web app or orchestrator
 
 ### Flow B — Agent Registration
 
-1. Orchestrator clicks **Add Agent** in the web app or calls `POST /v1/orchestrator/groups/:id/agents`
-2. System generates a one-time invitation code — shown once, expires in 24 hours
+1. Orchestrator clicks **Add Agent** in the web app (or runs the equivalent Node script). The orchestrator's wallet signs the on-chain `add_agent` instruction; once confirmed, the SPA POSTs `{tx_sig, agent_wallet_pda}` to `POST /v1/orchestrator/groups/:group_config_pda/agents` to mint the invite code.
+2. Backend verifies the on-chain agent belongs to the route's group, then generates a one-time invitation code — shown once, expires in 24 hours
 3. Agent (or orchestrator on agent's behalf) calls `POST /v1/register` with the invitation code
 4. Backend creates a scoped API key, returns it **once** — never stored or shown again
 5. Agent stores the API key in its secret manager or environment
@@ -198,7 +199,7 @@ No address outside the whitelist can receive funds regardless of backend state. 
 
 **Agent API key** — scoped credential issued at registration. Never stored in plaintext (bcrypt hash only). Revocable instantly. Agent never sees or holds the underlying wallet private key.
 
-**Orchestrator auth** — Solana wallet signature (web app) or orchestrator API key (programmatic provisioning). Separate credential tier with group admin capabilities.
+**Orchestrator auth** — Sign-In-With-Solana (SIWS) for both browser (Solflare) and headless (Node) orchestrators, producing a Supabase JWT. The same JWT authorizes the web app and the four credential-minting REST endpoints; on-chain mutations (group create, whitelist, agent create, limit updates) are signed directly by the orchestrator's wallet. There is no separate orchestrator API key — wallet ownership IS the orchestrator credential, and `requireGroupAccess` derives the group from the JWT's wallet pubkey via `["group", wallet_pubkey]` PDA derivation.
 
 ### Limitations
 
