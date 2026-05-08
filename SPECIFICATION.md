@@ -77,15 +77,16 @@ Seed: `["wallet", group_pubkey, agent_index as u8]`
 
 ```
 group:               Pubkey
+mint:                Pubkey    // settlement SPL mint — bound at add_agent, immutable, only mint that can ever leave custody via execute_transfer / execute_lending_op
 display_name:        [u8; 32]  // human label for fleet dashboard ("research-bot-1")
-daily_limit:         u64       // USDC 6-decimal units
+daily_limit:         u64       // settlement-mint native units (e.g. 6-decimal USDC)
 per_tx_limit:        u64
 hourly_tx_cap:       u8
-spent_today:         u64       // resets at UTC midnight
-tx_count_this_hour:  u8        // resets on the hour
+spent_today:         u64       // resets at UTC midnight; tracks execute_transfer + execute_lending_op only — execute_swap does not bump it
+tx_count_this_hour:  u8        // resets on the hour; advances for every privileged instruction including swaps
 last_spend_reset:    i64
 last_hour_reset:     i64
-operator_nonce:      u64       // incremented per execute_transfer — replay protection
+operator_nonce:      u64       // incremented per privileged instruction — replay protection
 bump:                u8        // canonical PDA bump cached to skip re-derivation
 ```
 
@@ -94,7 +95,9 @@ bump:                u8        // canonical PDA bump cached to skip re-derivatio
 - `per_tx_limit`: 1 USDC (1_000_000)
 - `hourly_tx_cap`: 5
 
-Token accounts (ATAs) are owned by the `AgentWallet` PDA and created at agent initialization.
+Token accounts (ATAs) are owned by the `AgentWallet` PDA. `add_agent` initializes the ATA for the bound mint; additional ATAs (for mints accumulated via swaps) are created on demand by the orchestrator.
+
+**Mint binding.** The `mint` field is set once at `add_agent` time and never mutated. It defines what can leave agent custody via outbound paths: `execute_transfer` and `execute_lending_op` reject any `*_token_account.mint != agent_wallet.mint`. To repurpose an agent for a different settlement mint, retire it and create a new one — agents are cheap and binding is intentional.
 
 #### `WhitelistEntry` PDA
 Seed: `["whitelist", group_pubkey, target_address]`
@@ -202,22 +205,27 @@ Enforcement (in order):
 #### `execute_swap`
 Called by the backend operator for every swap routed through the whitelisted DEX aggregator. Authorisation rides on a `entry_type = 2` (protocol) `WhitelistEntry` keyed on the aggregator program ID, so the orchestrator can rotate router versions by editing the whitelist alone — no program redeploy. The handler deducts the protocol fee from the input mint **before** invoking the aggregator CPI; output mint is unknown to Enclz at signing time, which makes input-side fee the only deterministic option.
 
+**Mint policy.** `execute_swap` is the only privileged path that does NOT pin the input or output mint to `agent_wallet.mint`. Instead, the load-bearing safety constraint is `to_token_account.owner == agent_wallet` PDA — swap proceeds always remain in custody of the agent_wallet PDA. A compromised operator can rotate the agent's holdings between any mints but cannot exfiltrate them; the only outbound path remains `execute_transfer`, which is pinned to the bound mint.
+
 ```
 Accounts:
-  backend_operator         [signer]
-  group_config             []
-  agent_wallet             [writable]   // limits + nonce updated here
-  from_token_account       [writable]   // agent input ATA
-  to_token_account         [writable]   // agent output ATA (mint may differ from input)
-  whitelist_entry          []           // type-2 PDA keyed on jupiter_program.key()
-  protocol_fee_token_acct  [writable]   // Enclz protocol ATA on the input mint
-  jupiter_program          []           // swap aggregator program; authorised via whitelist_entry
-  token_program            []
+  backend_operator           [signer, writable]   // also pays rent for fee-ATA init_if_needed
+  group_config               []
+  agent_wallet               [writable]   // nonce + hourly counter updated here
+  from_token_account         [writable]   // agent input ATA (any mint owned by the agent_wallet PDA)
+  to_token_account           [writable]   // agent output ATA — owner MUST equal agent_wallet (custody pin)
+  whitelist_entry            []           // type-2 PDA keyed on jupiter_program.key()
+  input_mint                 []           // SPL mint of the input ATA — used to derive the fee-ATA seed
+  protocol_fee_token_acct    [writable, init_if_needed]  // Enclz protocol ATA on the input mint; created on first use of a novel mint, rent paid by backend_operator
+  protocol_fee_wallet        []           // address-bound to group_config.protocol_fee_wallet; authority for the fee ATA
+  jupiter_program            []           // swap aggregator program; authorised via whitelist_entry
+  token_program              []
+  associated_token_program   []
   system_program
   // remaining_accounts: variable account list shaped by the route plan; passed to the aggregator CPI verbatim
 
 Args:
-  amount_in:           u64    // gross input — limit checks and fee math run on this
+  amount_in:           u64    // gross input — fee math runs on this
   minimum_amount_out:  u64    // surfaced in IDL; aggregator enforces it inside route_data
   expected_nonce:      u64
   agent_index:         u8
@@ -226,13 +234,13 @@ Args:
 
 Enforcement order:
 1. `expected_nonce == agent_wallet.operator_nonce` → bump nonce.
-2. Roll `spent_today` / `tx_count_this_hour` if the relevant boundary has elapsed.
-3. Limit checks against `amount_in` (fee + net both count against the daily cap).
+2. Roll `tx_count_this_hour` if the hour boundary has elapsed (note: `spent_today` / `last_spend_reset` are NOT touched on the swap path — daily and per-tx limits are denominated in the bound mint and meaningless across arbitrary swap mints).
+3. `tx_count_this_hour < hourly_tx_cap` is the only spend-policy gate. `per_tx_limit` and `daily_limit` are NOT enforced on swaps; the custody pin removes the theft threat those limits guarded against.
 4. Reject if `whitelist_entry.entry_type != 2` → `whitelist_violation`.
-5. Compute fee from `amount_in` (10 bps).
-6. Transfer fee from agent input ATA to protocol ATA (PDA-signed CPI).
+5. Compute fee from `amount_in` (10 bps, in the input mint).
+6. Transfer fee from agent input ATA to protocol fee ATA (PDA-signed CPI). The fee ATA is created lazily via `init_if_needed` on first use of a novel input mint; rent is charged to `backend_operator`.
 7. Invoke the aggregator program via CPI with `route_data` and `remaining_accounts`, signed by the agent_wallet PDA.
-8. Update counters; type-2 entries are uncapped, so no `amount_used` increment.
+8. Increment `tx_count_this_hour` by 1. `spent_today` is unchanged.
 
 #### `execute_lending_op`
 Unified deposit/withdraw against a whitelisted lending program. Backend dispatches `/v1/deposit` to `op_type = 0` and `/v1/withdraw` to `op_type = 1`; these discriminants are part of the on-chain ABI and are pinned in `lib.rs` tests.
@@ -316,7 +324,22 @@ Args:
 ```
 
 #### `emergency_withdraw`
-Owner-only. Bypasses daily limits, sweeps all agent vault tokens to a destination address.
+Owner-only. Bypasses spend limits and operator nonce, sweeps the full balance of one agent ATA to a destination ATA via SPL token CPI signed by the agent_wallet PDA.
+
+**Mint policy: parity, not absolute pin.** Both ATAs must agree on mint (`agent_token_account.mint == destination_token_account.mint`) to prevent typo-driven cross-mint transfers, but neither side is pinned to `agent_wallet.mint`. This lets the owner sweep any mint the agent has accumulated via `execute_swap` (the agent's PDA can hold ATAs for arbitrary mints under the bind-agent-mint policy). To recover multiple mints, invoke `emergency_withdraw` once per mint with that mint's pair of ATAs.
+
+```
+Accounts:
+  owner                      [signer]
+  group_config               []
+  agent_wallet               []
+  agent_token_account        [writable]   // any mint, owner == agent_wallet PDA
+  destination_token_account  [writable]   // mint must match agent_token_account.mint
+  token_program              []
+
+Args:
+  agent_index:  u8
+```
 
 #### `update_backend_operator`
 Owner-only. Rotates the authorized backend keypair.
