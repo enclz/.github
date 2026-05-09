@@ -229,7 +229,7 @@ Rather than maintaining language-specific SDKs, Enclz ships two integration arti
 
 **`openapi.json`** — Machine-readable OpenAPI 3.1 spec covering all agent REST endpoints. Consumed by code generators, API clients, and AI assistants.
 
-**`AGENT_SKILL.md`** — Markdown file designed to be injected into an agent's system prompt or context. Describes all available operations, parameter formats, error codes, and policy constraints in a format optimized for LLM consumption. Drop-in compatible with LangChain tool context, AutoGen skill description, and plain system-prompt injection.
+**`SKILL.md`** — Markdown file designed to be injected into an agent's system prompt or context. Describes all available operations, parameter formats, error codes, and policy constraints in a format optimized for LLM consumption. Drop-in compatible with LangChain tool context, AutoGen skill description, and plain system-prompt injection.
 
 **MCP Server** — Model Context Protocol server wrapping the Agent REST API. Exposes Enclz operations as native MCP tools — no HTTP client code, no SDK. Compatible with any MCP runtime: Claude Desktop, Cursor, Claude Code, or custom agents built with the MCP SDK. Configured with a single env var (`ENCLZ_API_KEY`); the agent API key is already issued at registration. Each tool maps 1:1 to an agent REST endpoint and returns structured JSON that MCP runtimes can reason over directly.
 

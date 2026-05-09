@@ -1014,7 +1014,7 @@ OpenAPI 3.1 spec covering all agent REST endpoints (`/v1/*`). Generated from rou
 
 Location: `docs/openapi.json`
 
-### `AGENT_SKILL.md`
+### `SKILL.md`
 
 Markdown file designed for injection into agent system prompts or context windows. Describes:
 - Available operations (transfer, swap, deposit, withdraw, balance, limits, history, simulate)
@@ -1026,7 +1026,7 @@ Markdown file designed for injection into agent system prompts or context window
 
 Compatible with LangChain tool context injection, AutoGen skill description blocks, and plain system-prompt augmentation. No SDK required — agents call the REST API directly using any HTTP client.
 
-Location: `docs/AGENT_SKILL.md`
+Location: served at `https://enclz.com/SKILL.md` (canonical)
 
 ### MCP Server
 
