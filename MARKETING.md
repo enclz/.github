@@ -18,7 +18,7 @@ Solo developer or small team building a product where agents need to pay for thi
 
 **Enclz fit**: Agent gets a scoped API key — never the private key. On-chain limits mean a hallucinating agent can't exceed $1/tx regardless of what the backend does. External service addresses are whitelisted with a time-bound, amount-capped approval — once the budget is consumed the slot auto-voids on-chain, not in a backend. Simulate endpoint lets agents pre-check before committing. Policy templates get them running in under 5 minutes.
 
-**Why #1**: Largest cohort of potential users. Ship to their existing frameworks with zero SDK dependency — REST API + `AGENT_SKILL.md` is all they need. Pain is acute and immediate.
+**Why #1**: Largest cohort of potential users. Ship to their existing frameworks with zero SDK dependency — REST API + `SKILL.md` is all they need. Pain is acute and immediate.
 
 **Unit math**: 1 developer, 10 agents, $10/day each = $100/day under management. Enclz takes 10 bps = $0.10/day. Scale to 1,000 developers = $100/day protocol revenue. Revenue scales with agent activity, not seat count.
 
@@ -82,7 +82,7 @@ Enclz is developer infrastructure, not a financial product. Orchestrators config
 
 | Channel | Tactic |
 |---|---|
-| GitHub | Open-source `AGENT_SKILL.md`, `openapi.json`, and `@enclz/mcp-server`; agents that use Enclz link back |
+| GitHub | Open-source `SKILL.md`, `openapi.json`, and `@enclz/mcp-server`; agents that use Enclz link back |
 | MCP ecosystem | List in MCP server directories; Claude Desktop + Cursor users discover via `npx @enclz/mcp-server` |
 | LangChain / AutoGen community | Tutorial: "Give your LangChain agent a Solana wallet in 10 minutes" |
 | HackerNews Show HN | Demo: agent that pays for its own API calls with on-chain spend enforcement |
@@ -161,11 +161,11 @@ One file per interview: date, persona type, framework used, current payment appr
 | Simulation / dry-run | Yes | No | No | No | No |
 | Anomaly alerting | Yes (webhooks) | No | No | No | No |
 | MCP server | Yes | No | No | No | No |
-| Agent context injection | Yes (AGENT_SKILL.md) | No | No | No | No |
+| Agent context injection | Yes (SKILL.md) | No | No | No | No |
 
 ¹ "No SDK required" describes the **agent integration path** (Agent REST API + MCP server). Direct on-chain callers — the Enclz backend, programs composing via CPI, security researchers, auditors — may use `@enclz/sdk` (npm) or fetch the IDL on-chain via `Program.fetchIdl()`. See `REQUIREMENTS.md` § Program Integration Resources.
 
 **Lead with**: enforcement survives backend compromise AND no SDK required AND TTL + amount-capped whitelist that auto-voids on-chain. Openfort can match the backend-compromise claim but requires an SDK, is EVM-first, and has no per-address amount ceiling or auto-void mechanic. No competitor ships a simulation endpoint, MCP server, or on-chain amount-exhaustion enforcement.
 
-**Against Openfort specifically**: Solana-native architecture, zero-SDK REST + MCP integration, AGENT_SKILL.md for LLM context injection, and simulation endpoint. Openfort is multi-chain generalist; Enclz is Solana-specialist with agent-first DX.
+**Against Openfort specifically**: Solana-native architecture, zero-SDK REST + MCP integration, SKILL.md for LLM context injection, and simulation endpoint. Openfort is multi-chain generalist; Enclz is Solana-specialist with agent-first DX.
 

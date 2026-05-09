@@ -39,14 +39,14 @@ No hard no-go triggers. Openfort is a real on-chain enforcement competitor — d
 
 | Product | On-chain enforcement | Solana-native | No SDK | Agent-first DX | Simulate |
 |---|---|---|---|---|---|
-| **Enclz** | ✓ Anchor | ✓ Native | ✓ REST + MCP | ✓ AGENT_SKILL.md + MCP | ✓ |
+| **Enclz** | ✓ Anchor | ✓ Native | ✓ REST + MCP | ✓ SKILL.md + MCP | ✓ |
 | Openfort | ✓ ERC-4337/EIP-7702 | ~ EVM-first | ✗ SDK required | ~ Generic | ✗ |
 | lobster.cash (Crossmint) | ✗ Off-chain | ✓ + card rails | ✓ | ~ Card + USDC focus | ✗ |
 | Coinbase AgentKit | ✗ App layer | ~ Recently added | ✗ SDK required | ~ Generic | ✗ |
 | Privy Server Wallets | ✗ Off-chain | ~ Multi-chain | ✗ SDK required | ~ Generic | ✗ |
 | Trust Wallet Agent Kit | ✗ Unknown | ~ Multi-chain | ✗ SDK required | ✗ | ✗ |
 
-**Primary threat: Openfort.** They have on-chain enforcement and claim Solana support, but are EVM-first (ERC-4337/EIP-7702), require an SDK, and have no agent-specific DX. Enclz must own: Solana-native + no-SDK + AGENT_SKILL.md context injection + MCP server + simulation endpoint.
+**Primary threat: Openfort.** They have on-chain enforcement and claim Solana support, but are EVM-first (ERC-4337/EIP-7702), require an SDK, and have no agent-specific DX. Enclz must own: Solana-native + no-SDK + SKILL.md context injection + MCP server + simulation endpoint.
 
 ### Notes on Key Competitors
 
@@ -96,7 +96,7 @@ No hard no-go triggers. Openfort is a real on-chain enforcement competitor — d
 
 ### Strategic Insight from Hackathon Data
 
-**Latinum won 1st place AI at Breakout with MCP-compatible wallet.** The winning pattern: meet agents where they run (MCP runtimes), minimize integration friction. Enclz's `AGENT_SKILL.md` + `openapi.json` + MCP server covers all three distribution channels simultaneously. This directly mirrors the approach that won.
+**Latinum won 1st place AI at Breakout with MCP-compatible wallet.** The winning pattern: meet agents where they run (MCP runtimes), minimize integration friction. Enclz's `SKILL.md` + `openapi.json` + MCP server covers all three distribution channels simultaneously. This directly mirrors the approach that won.
 
 ---
 
@@ -104,7 +104,7 @@ No hard no-go triggers. Openfort is a real on-chain enforcement competitor — d
 
 | Risk | Severity | Description |
 |---|---|---|
-| Openfort competitive convergence | High | If they add agent-first DX (AGENT_SKILL.md equivalent, simulation, Solana-native UX), differentiation narrows. Window is now. |
+| Openfort competitive convergence | High | If they add agent-first DX (SKILL.md equivalent, simulation, Solana-native UX), differentiation narrows. Window is now. |
 | Institutional consolidation | High | Coinbase + Mastercard throwing weight behind competitors. Well-funded player could acquire Openfort or double down on Solana on-chain enforcement. |
 | Smart contract audit | Medium | Required before mainnet. $10–40k, 4–8 week lead time. Bug in spend enforcement or nonce logic is catastrophic. |
 | Developer adoption friction | Medium | "Survives backend compromise" claim needs a demo that makes it visceral, not just a technical argument. |
