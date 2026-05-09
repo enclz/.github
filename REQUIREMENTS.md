@@ -124,11 +124,9 @@ Agent queries current state without executing any transaction:
 
 ### Flow G — Simulation (Dry Run)
 
-1. Agent calls `POST /v1/intents/simulate` with same body as a transfer or swap
-2. System checks whitelist and current limit state without submitting any transaction
-3. Response returns `{ "would_succeed": true/false, "reason": "daily_limit_exceeded" | ... }`
+Agent calls `POST /v1/intents/simulate` with the same body it would send to a real intent (transfer, swap, deposit, withdraw). The response indicates whether the live call would succeed under the same enforcement the chain applies, plus a refusal reason and the agent's remaining headroom — no transaction submitted, no fee consumed.
 
-Agents pre-check before committing, especially in limit-sensitive workflows. Eliminates unnecessary failed-tx fees.
+Agents pre-check before committing, especially in limit-sensitive workflows and cost-bounded research runs. Simulation must share the enforcement path of the corresponding live intent so it cannot diverge from the policy actually applied at execution time.
 
 ### Flow H — Incoming Payment Notification
 
