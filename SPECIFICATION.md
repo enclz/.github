@@ -104,6 +104,7 @@ Seed: `["whitelist", group_pubkey, target_address]`
 
 ```
 label:            [u8; 32]  // "Helius RPC service", "Kamino USDC vault"
+target:           Pubkey    // target address, stored redundantly for read-side convenience
 added_by:         Pubkey    // audit trail
 entry_type:       u8        // 0 = intra-group agent (permanent), 1 = external recipient (TTL + amount-capped), 2 = protocol address (permanent)
 ttl_expires_at:   i64       // Unix timestamp; 0 = no expiry (used for entry_type 0 and 2)
@@ -166,15 +167,18 @@ Called by the backend operator for every direct token transfer. Validates nonce,
 
 ```
 Accounts:
-  backend_operator         [signer]
+  backend_operator         [signer, writable]  // pays rent if recipient ATA needs init
   group_config             []
   group_owner              [writable]   // group_config.owner — receives rent when an external whitelist entry auto-voids
   agent_wallet             [writable]   // limits + nonce updated here
   from_token_account       [writable]   // agent vault ATA
-  to_token_account         [writable]   // recipient ATA (must exist)
+  recipient_wallet         []            // pubkey constrained != protocol_fee_wallet and != agent_wallet PDA
+  to_token_account         [writable]   // recipient ATA (auto-created via init_if_needed if missing)
   whitelist_entry          [writable]   // PDA must exist for recipient address; mutated for type-1 amount_used and may be closed on auto-void
   protocol_fee_token_acct  [writable]   // Enclz protocol ATA
+  mint                     []            // must match agent_wallet.mint
   token_program            []
+  associated_token_program []            // needed for ATA init_if_needed
   system_program
 
 Args:
@@ -190,16 +194,17 @@ Enforcement (in order):
 4. Reject if `amount > per_tx_limit`
 5. Reject if `spent_today + amount > daily_limit`
 6. Reject if `tx_count_this_hour >= hourly_tx_cap`
-7. The `whitelist_entry` PDA must exist for the recipient address — Anchor's seed constraint enforces this during account resolution. A missing PDA surfaces as Anchor's `AccountNotInitialized` (3012); the backend translates this to `whitelist_violation` for the REST response.
-8. If `whitelist_entry.entry_type == 1` (external recipient):
+7. Reject if `recipient_wallet == group_config.protocol_fee_wallet` or `recipient_wallet == agent_wallet` PDA → `recipient_invalid` (checked at Anchor constraint layer, before duplicate-mut check)
+8. The `whitelist_entry` PDA must exist for the recipient address — Anchor's seed constraint enforces this during account resolution. A missing PDA surfaces as Anchor's `AccountNotInitialized` (3012); the backend translates this to `whitelist_violation` for the REST response.
+9. If `whitelist_entry.entry_type == 1` (external recipient):
    a. Reject if `now > whitelist_entry.ttl_expires_at` → `whitelist_expired`
    b. Reject if `whitelist_entry.amount_used + amount > whitelist_entry.approved_amount` → `whitelist_amount_exhausted`
-9. Compute protocol fee:
-   - `protocol_fee = amount * 10 / 10_000`  (10 bps = 0.1%)
-   - `net_amount = amount - protocol_fee`
-10. Execute SPL token transfer: `net_amount` to recipient, `protocol_fee` to `protocol_fee_wallet`
-11. Increment `spent_today` (by `amount`, not `net_amount` — fee counts against limit) and `tx_count_this_hour`
-12. If `whitelist_entry.entry_type == 1`: increment `whitelist_entry.amount_used` by `amount`
+10. Compute protocol fee:
+    - `protocol_fee = ceil(amount * 10 / 10_000)`  (10 bps = 0.1%, integer ceil)
+    - `total = amount + protocol_fee`
+11. Execute SPL token transfer: `amount` to recipient, `protocol_fee` to `protocol_fee_wallet` (total drained from agent = `amount + fee`)
+12. Increment `spent_today` (by `amount`, not `total` — fee is overhead, not spend) and `tx_count_this_hour`
+13. If `whitelist_entry.entry_type == 1`: increment `whitelist_entry.amount_used` by `amount`
     - If `whitelist_entry.amount_used >= whitelist_entry.approved_amount`: close `whitelist_entry` PDA (auto-void, rent returned to owner)
 
 #### `execute_swap`
