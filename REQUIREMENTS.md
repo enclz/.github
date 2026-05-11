@@ -43,21 +43,36 @@ Autonomous software process, not a human.
 
 | Channel | Who uses it | Purpose |
 |---|---|---|
-| **Web App** | Orchestrator (A2) | Group setup, agent provisioning, whitelist management, policy config, fleet dashboard, audit log |
-| **Orchestrator on-chain mutations** | Orchestrator (A2) | Group creation, whitelist add/renew/remove, agent creation, per-agent limit updates — signed by the orchestrator's Solana wallet (Solflare in the browser; raw keypair in a Node script). Authenticated by Sign-In-With-Solana, no separate API key. |
-| **Orchestrator REST API** | Orchestrator (A2) | Four credential-minting endpoints only: invite-code issuance, agent API key rotation/revocation, fleet webhook registration. All other orchestrator actions go on-chain. |
-| **Agent REST API** | AI Agent (B2) | Transfer, swap, deposit, withdraw, balance/limit queries, webhook registration, simulation |
-| **MCP Server** | AI Agent (B2) | Native tool integration for MCP-enabled runtimes (Claude, Cursor, any MCP client) — same operations as Agent REST API, zero HTTP client code required |
+| **Web App** | Orchestrator (A2) | Group setup, token registry curation, agent provisioning, whitelist management, policy config, fleet dashboard, audit log, x402 budget dashboard |
+| **Orchestrator on-chain mutations** | Orchestrator (A2) | Group creation, whitelist add/renew/remove, agent creation, per-agent limit updates, x402 budget approvals (SPL Token `Approve`/`Revoke`) — signed by the orchestrator's Solana wallet (Solflare in the browser; raw keypair in a Node script). Authenticated by Sign-In-With-Solana — wallet ownership is the credential. |
+| **Orchestrator REST API** | Orchestrator (A2) | Credential minting (invite codes, API key rotation/revocation, fleet webhook registration), token registry CRUD, x402 payment history + aggregations. All policy / budget mutations remain on-chain. |
+| **Agent activation URL** | Orchestrator → AI Agent (B2) | One-shot enclz.com/on&lt;token&gt; URL the orchestrator shares with an agent. GET returns Markdown install instructions; POST single-use, drops a bash CLI containing the agent's credentials. The agent never sees plaintext key handling. |
+| **Agent REST API** | AI Agent (B2) | Transfer, swap, deposit, withdraw, balance/limit queries, simulation, webhook registration, x402 payment resolution (`/v1/x402/pay`, `/v1/x402/proxy`) |
+| **Agent CLI (`enclz`)** | AI Agent (B2) | Thin curl wrapper installed by the activation URL; first positional arg is the endpoint path, optional JSON body is the request payload, with auto-generated UUID idempotency keys. Includes a dedicated `x402/pay` subcommand. |
+| **MCP Server** | AI Agent (B2) | Native MCP integration: 5 mutating tools (`transfer`, `swap`, `deposit`, `withdraw`, `simulate`) + 3 read-only resources (`enclz://balance`, `enclz://limits`, `enclz://history`). Configured with `ENCLZ_API_KEY` + `ENCLZ_API_URL`. |
 
 ---
 
 ## Core Model
 
-Each agent gets a dedicated wallet on Solana. The wallet is governed by a spend policy — daily limit, per-transaction limit, hourly frequency cap — and a whitelist of approved recipient addresses and protocol addresses. These rules are enforced on-chain: no backend configuration or compromise can override them.
+Each agent gets a dedicated wallet on Solana, bound at creation time to exactly one SPL mint chosen from the group's curated token registry. The wallet is governed by a spend policy — daily limit, per-transaction limit, hourly frequency cap — and a whitelist of approved recipient addresses and protocol addresses. These rules are enforced on-chain: no backend configuration or compromise can override them.
 
 External addresses are whitelisted with a **TTL** (expiry timestamp) and an **approved amount cap**. Once the full approved amount is transferred to an address, the whitelist entry is automatically voided on-chain — the orchestrator must explicitly re-approve it. Intra-group agent addresses and protocol addresses (DEX router, lending pools) are permanent and unlimited.
 
-The orchestrator controls group setup and policy by signing on-chain instructions directly — from the web app via Solflare, or from a Node script holding a local keypair. Both paths use Sign-In-With-Solana for backend auth. The agent interacts only through the agent REST API using a scoped API key — no private key, no signing, no crypto knowledge required.
+The chain pins outbound paths (`execute_transfer`, `execute_lending_op`) to the bound mint; swaps relax the input-mint constraint but enforce custody via the output ATA's owner, so an agent can accumulate non-bound mints and swap them back to its bound mint, but cannot exfiltrate them. The bound mint is captured into `AgentWallet.mint` at `add_agent` time and is immutable — to repurpose an agent for a different mint, retire it and create a new one.
+
+The orchestrator controls group setup and policy by signing on-chain instructions directly — from the web app via Solflare, or from a Node script holding a local keypair. Both paths use Sign-In-With-Solana for backend auth. The agent interacts only through the agent REST API using a scoped API key — no private key, no signing, no crypto knowledge required. The canonical onboarding shape is a single URL (`https://enclz.com/on<token>`) the orchestrator pastes to the agent; the agent's first `curl ... | bash` writes a thin CLI that wraps the REST surface.
+
+### Token registry
+
+Every group curates a per-group catalogue of SPL mints (`{symbol, decimals, label}`) that agents may bind to. The catalogue is the only place agents receive a `symbol` — there is no global "USDC", and the dashboard renders each agent's amounts in its own bound symbol. The chain owns the per-agent binding (`AgentWallet.mint`); the registry holds metadata only. An agent-creation wizard refuses to advance with an empty registry, and registry DELETE is refused while any agent is bound.
+
+### x402 payment surface
+
+Agents that hit an HTTP 402 Payment Required response have two ways to settle:
+
+- **Orchestrator-delegated** (`POST /v1/x402/pay`) — the orchestrator pre-approves a fixed allowance to the platform delegate via SPL Token `Approve` on their own ATA; the backend partial-signs a `TransferChecked` against that allowance and hands the agent a `follow_up` envelope (`X-PAYMENT` for v1, `PAYMENT-SIGNATURE` for v2) to attach on its retry. The x402 facilitator on the resource server's side signs as fee payer and submits. Budget state lives entirely in SPL Token `delegate / delegatedAmount / amount` — there is no backend budget table.
+- **Agent-funded** (`POST /v1/x402/proxy`) — pays from the agent's own wallet via `execute_transfer`. Subject to the agent's whitelist + spend ceiling, exactly like a regular transfer.
 
 ---
 
@@ -65,24 +80,29 @@ The orchestrator controls group setup and policy by signing on-chain instruction
 
 ### Flow A — Group Setup
 
-1. Orchestrator opens the web app (no wallet required to browse or preview) and connects their Solana wallet (browser via Solflare, or headless via a Node script that holds an Ed25519 keypair). Both paths perform Sign-In-With-Solana to obtain a Supabase JWT, then sign the on-chain `initialize_group` instruction directly — there is no separate "orchestrator API" call to provision a group.
+1. Orchestrator opens the web app (no wallet required to browse or preview) and connects their Solana wallet (browser via Solflare, or headless via a Node script that holds an Ed25519 keypair). Both paths perform Sign-In-With-Solana to obtain a Supabase JWT, then sign the on-chain `initialize_group` instruction directly.
 2. A `GroupConfig` is recorded on-chain. If the on-chain instruction fails, the web app shows an error with a retry button — no partial state is persisted.
-3. Orchestrator adds agent members — each gets a dedicated wallet PDA on-chain
-4. Orchestrator configures per-agent policy: whitelist of approved service endpoints, per-tx/daily/hourly limits
-5. Orchestrator optionally selects a policy template as a starting point
-6. For each external service address added to the whitelist, orchestrator sets a TTL (e.g., 30 days) and an approved amount cap (e.g., $50 total). Intra-group agent addresses are added automatically with no TTL and no cap.
+3. Orchestrator curates the per-group SPL token registry — at minimum, one mint must be registered before agents can be created. The dashboard's "Seed defaults" action bulk-inserts canonical devnet mints; manual entry pastes a mint pubkey, reads decimals via `getMint`, and POSTs to the registry (backend re-verifies decimals).
+4. Orchestrator adds agent members — each picks a mint from the registry at creation time, and the chain captures it into `AgentWallet.mint`.
+5. Orchestrator configures per-agent policy: whitelist of approved service endpoints, per-tx/daily/hourly limits
+6. Orchestrator optionally selects a policy template as a starting point
+7. For each external service address added to the whitelist, orchestrator sets a TTL (e.g., 30 days) and an approved amount cap (e.g., $50 total). Intra-group agent addresses are added automatically with no TTL and no cap.
+8. Optionally, orchestrator opens the x402 dashboard and signs SPL Token `Approve` instructions delegating the platform delegate a per-currency spending cap for autonomous HTTP-402 payments. No REST call; delegation lives entirely on-chain.
 
 ### Flow B — Agent Registration
 
-1. Orchestrator clicks **Add Agent** in the web app (or runs the equivalent Node script). The orchestrator's wallet signs the on-chain `add_agent` instruction; once confirmed, the SPA POSTs `{tx_sig, agent_wallet_pda}` to `POST /v1/orchestrator/groups/:group_config_pda/agents` to mint the invite code.
-2. Backend verifies the on-chain agent belongs to the route's group, then generates a one-time invitation code — shown once, expires in 24 hours
-3. Agent (or orchestrator on agent's behalf) calls `POST /v1/register` with the invitation code
-4. Backend creates a scoped API key, returns it **once** — never stored or shown again
-5. Agent stores the API key in its secret manager or environment
-6. Invitation code is invalidated immediately — cannot be replayed
-7. Agent is now active: can transfer, swap, query balance, all subject to on-chain policy
+1. Orchestrator clicks **Add Agent** in the web app (or runs the equivalent Node script) and picks a registry mint. The orchestrator's wallet signs the on-chain `add_agent` instruction; once confirmed, the SPA POSTs `{tx_sig, agent_wallet_pda, token_mint}` to `POST /v1/orchestrator/groups/:group_config_pda/agents`.
+2. Backend verifies the on-chain agent belongs to the route's group, asserts `AgentWallet.mint == token_mint`, asserts the mint is in `group_tokens`, then mints a one-time activation token shaped `on<8 alphanumeric>` — shown once, expires in 24 hours.
+3. The dashboard renders the activation URL `https://enclz.com/on<token>` and a copy-paste snippet `Activate wallet: https://enclz.com/on<token>`. The orchestrator shares this single line with the agent (chat client, email, system prompt — anywhere).
+4. The agent (human or LLM) follows the URL:
+   - `GET https://enclz.com/on<token>` returns a Markdown page with install instructions, side-effect free, so the same URL can be opened repeatedly.
+   - The install command runs `curl -sSf -X POST https://enclz.com/api/v1/onboard/on<token> | bash`, which atomically redeems the token and writes the agent CLI to `~/.local/bin/enclz` with the API key, `agent_wallet_pda`, and base URL embedded as shell constants. The plaintext API key never lands in the agent's context — only the CLI binary holds it.
+   - Subsequent POSTs against the same token return 404. Tokens expire after 24h; orchestrators can re-mint via the dashboard.
+5. The agent is now active: `enclz balance`, `enclz transfer '<json>'`, `enclz x402/pay '<challenge>'`, etc. — all subject to on-chain policy.
 
-If the API key is compromised: orchestrator revokes it in the web app, issues a new invite code, agent re-registers.
+For headless setups, `POST /v1/register` accepts the same code and returns the API key as JSON (instead of a bash script) for programmatic flows that don't want a shell binary on disk.
+
+If the API key is compromised: orchestrator revokes it in the dashboard and clicks "Rotate key" to atomically revoke + mint a new one, OR uses "Re-invite" to mint a fresh activation URL without rotating the key.
 
 ### Flow C — Agent Transfer
 
@@ -144,6 +164,17 @@ Orchestrator registers a webhook for policy events across their fleet:
 
 Allows orchestrators to detect runaway agents or injection attacks without polling. Expiry and amount alerts give orchestrators time to re-approve before agents are blocked.
 
+### Flow J — x402 Payment Resolution
+
+1. Agent makes an HTTP request to a paywalled resource (`enclz x402/pay '<verbatim 402 challenge>'` or a direct `POST /v1/x402/pay`).
+2. Backend decodes the v1/v2 challenge, verifies the `scheme` is Solana `exact`, looks up the `asset` mint against the group's token registry for decimals, and reads the orchestrator's delegated allowance live from chain.
+3. If the platform delegate is approved with sufficient allowance and the budget ATA has sufficient balance, the backend partial-signs a `TransferChecked` against the orchestrator's ATA and returns `follow_up = { url, headers }` where `headers` is a single-entry map containing the x402 payment payload.
+4. Agent attaches `headers` on its retry to the resource server. The x402 facilitator on the resource server's side fills the fee-payer signature slot, submits on chain, and returns the resource.
+5. The signed offer is recorded in `x402_transactions`; orchestrators see it in the dashboard's history table and aggregations.
+6. For agent-funded payments (whitelist-enforced, no orchestrator delegation), agents instead call `POST /v1/x402/proxy` with the parsed challenge — equivalent to a manual `transfer` to the `payTo` address with all the usual on-chain ceilings applying.
+
+If the orchestrator has not approved the delegate, or the allowance is exhausted, the backend returns `402 x402_budget_not_configured | x402_budget_exhausted | insufficient_x402_budget`. The agent surfaces this back to the caller; the orchestrator opens the x402 dashboard and signs an `Approve` to top up.
+
 ---
 
 ## Security Model
@@ -197,7 +228,7 @@ No address outside the whitelist can receive funds regardless of backend state. 
 
 **Agent API key** — scoped credential issued at registration. Never stored in plaintext (bcrypt hash only). Revocable instantly. Agent never sees or holds the underlying wallet private key.
 
-**Orchestrator auth** — Sign-In-With-Solana (SIWS) for both browser (Solflare) and headless (Node) orchestrators, producing a Supabase JWT. The same JWT authorizes the web app and the four credential-minting REST endpoints; on-chain mutations (group create, whitelist, agent create, limit updates) are signed directly by the orchestrator's wallet. There is no separate orchestrator API key — wallet ownership IS the orchestrator credential, and `requireGroupAccess` derives the group from the JWT's wallet pubkey via `["group", wallet_pubkey]` PDA derivation.
+**Orchestrator auth** — Sign-In-With-Solana (SIWS) for both browser (Solflare) and headless (Node) orchestrators, producing a Supabase JWT. The same JWT authorizes the web app and every `/v1/orchestrator/*` REST endpoint (credential minting, token registry CRUD, x402 history + stats); on-chain mutations (group create, whitelist, agent create, limit updates, x402 budget approvals) are signed directly by the orchestrator's wallet. Wallet ownership IS the credential, and `requireGroupAccess` derives the group from the JWT's wallet pubkey via `["group", wallet_pubkey]` PDA derivation, so the URL's `:group_config_pda` must match for the call to succeed. The repo ships `examples/orchestrator-node.js` as a canonical demonstration of programmatic SIWS — accepts a Solana keypair via `ORCHESTRATOR_SECRET_KEY` (base58 string OR JSON-array byte format from the Solana CLI `id.json`), signs in, creates a group, creates one agent, prints the activation URL.
 
 ### Limitations
 
@@ -225,13 +256,17 @@ Templates are advisory — the orchestrator can override any field. The on-chain
 
 ## Agent Integration Resources
 
-Rather than maintaining language-specific SDKs, Enclz ships two integration artifacts:
+Rather than maintaining language-specific SDKs, Enclz ships three integration artifacts, all derived from a single source of truth (`openapi.json`, generated from Fastify route schemas):
 
-**`openapi.json`** — Machine-readable OpenAPI 3.1 spec covering all agent REST endpoints. Consumed by code generators, API clients, and AI assistants.
+**`openapi.json`** — Machine-readable OpenAPI 3.1 spec covering all agent REST endpoints. Generated by `npm run openapi:generate` (boots Fastify in spec-only mode and dumps `app.swagger()`) and validated in CI via `git diff --exit-code`. Consumed by code generators, API clients, and AI assistants. The published `servers:` array contains exactly one entry: `https://enclz.com` (no localhost / staging / `${ENCLZ_API_URL}`-style placeholders).
 
-**`SKILL.md`** — Markdown file designed to be injected into an agent's system prompt or context. Describes all available operations, parameter formats, error codes, and policy constraints in a format optimized for LLM consumption. Drop-in compatible with LangChain tool context, AutoGen skill description, and plain system-prompt injection.
+**`SKILL.md`** — Markdown file designed to be injected into an agent's system prompt or context. Self-contained: intro prose, generated tool table (5 rows), generated resource table (3 rows), generated error-remediation table, idempotency-header note, simulate-first guidance. Sections between marker comments are regenerated from `openapi.json`; intro / idempotency / simulate-first prose is hand-authored. All curl examples use the literal canonical host `https://enclz.com` rather than env-var placeholders so the file is paste-shareable.
 
-**MCP Server** — Model Context Protocol server wrapping the Agent REST API. Exposes Enclz operations as native MCP tools — no HTTP client code, no SDK. Compatible with any MCP runtime: Claude Desktop, Cursor, Claude Code, or custom agents built with the MCP SDK. Configured with a single env var (`ENCLZ_API_KEY`); the agent API key is already issued at registration. Each tool maps 1:1 to an agent REST endpoint and returns structured JSON that MCP runtimes can reason over directly.
+**MCP Server (`@enclz/mcp-server`)** — Model Context Protocol server wrapping the Agent REST API over stdio. Exposes 5 mutating tools (`transfer`, `swap`, `deposit`, `withdraw`, `simulate` — bare names, no `enclz_` prefix because MCP clients namespace by server name) and 3 read-only resources (`enclz://balance`, `enclz://limits`, `enclz://history`). Configured with two env vars: `ENCLZ_API_KEY` (issued at registration) and `ENCLZ_API_URL` (default `https://enclz.com`). Compatible with any MCP runtime: Claude Desktop, Cursor, Claude Code, or custom agents built with the MCP SDK.
+
+All three agent-facing surfaces describe the runtime in business terms only. On-chain rejections reach the agent as curated business codes (`whitelist_violation`, `daily_limit_exceeded`, etc.) plus human-readable remediation prose — the program's 6000–6013 discriminants are scrubbed by `agentSafeError`. A CI lint pass (`scripts/lint-agent-artifacts.mjs`) enforces this on `openapi.json`, `SKILL.md`, and the built MCP bundle.
+
+**Activation URL** is the canonical handoff — `https://enclz.com/on<token>` is what the orchestrator copies to the agent. The CLI installed by the activation URL is a thin curl wrapper, not a strongly-typed SDK; agents that prefer a typed surface use the MCP server.
 
 ---
 
@@ -259,7 +294,8 @@ The fee is charged to the sending agent's wallet at execution time, deducted fro
 
 - **Landing page (no wallet required)**: product overview, live devnet demo (transfer blocked by whitelist shown on Solana Explorer), policy template previews. Wallet connection only required to take action.
 - Connect Solana wallet, create groups
-- Add agents — policy template selection, limit override, invitation code generation
+- **Tokens dashboard** (`/group/:id/tokens`): curate the per-group SPL token catalogue — paste a mint, see decimals auto-resolved via `getMint`, add `{symbol, decimals, label}` to the registry. Per-row delete is enabled only when no agent is bound to the mint. A "Seed defaults" action bulk-inserts canonical devnet mints in one click. Required: at least one mint must be registered before agents can be created.
+- Add agents — policy template selection, limit override, mint selection from the registry, activation URL generation. The dashboard's success surface includes integration links to `openapi.json`, `SKILL.md`, and the MCP quick-start.
 - Manage whitelist:
   - Intra-group agents listed as permanent entries (read-only)
   - Add external address: set label, TTL (expiry date), approved amount cap
@@ -267,24 +303,28 @@ The fee is charged to the sending agent's wallet at execution time, deducted fro
   - Remove: close whitelist entry before expiry
   - Protocol addresses (DEX router, lending pools): permanent, no cap
 - Configure per-agent spend limits
-- Per-agent spend audit log (timestamp, amount, recipient, memo, task_id, agent ID)
+- Per-agent spend audit log (timestamp, amount, recipient, memo, task_id, agent ID). Each amount renders in the agent's bound symbol — the dashboard reads `AgentWallet.mint` and joins against the token registry for `{symbol, decimals}`. The fleet spend chart stacks one series per symbol.
 - Whitelist approval dashboard: shows each external entry's TTL countdown, amount used vs. cap, status (active / expiring soon / voided)
 - Revoke agent API key — immediately invalidates credential
-- Re-invite agent — issues fresh invitation code after revocation
-- Agent fleet dashboard — daily spend vs. limit, hourly tx rate, remaining headroom per agent
+- Re-invite agent — issues a fresh activation URL without rotating the key; a separate rotate-key action revokes + re-mints atomically
+- Agent fleet dashboard — daily spend vs. limit, hourly tx rate, remaining headroom per agent, plus 24h confirmed/blocked tx counts and a 7-day stacked spend chart per registry symbol
+- **x402 dashboard** (`/group/:id/x402`): editorial headline summarising current approvals ("Approved up to 50.00 USDC for x402 payments. Currently holding 12.30 USDC."), Configure modal that signs SPL Token `Approve`/`Revoke` per dirty currency, 30-day stacked bar chart of spending per symbol, per-endpoint aggregation table, recent payments list with Solana Explorer links
 - Anomaly alert configuration — set webhook URL for policy events across the fleet
-- Error recovery: all failed on-chain operations surface a human-readable error with a retry action; no silent failures
+- Error recovery: all failed on-chain operations surface a human-readable error with a retry action; no silent failures. The agent wire scrubs Anchor-level internals (`AnchorError`, `Custom program error`, `0x` discriminants) — sanitization applies only to the agent-facing surface; owner-facing dashboard pages still get the typed Anchor titles and remediation hints via `friendlyAnchorMessage`.
 
 ---
 
 ## Deferred
 
-- Programmatic key rotation API (currently: web app only)
-- Budget pool — orchestrator sets shared budget ceiling across agent fleet
-- Multi-sig for high-value operations (require orchestrator co-sign above threshold)
-- Human custody model (SMS / Telegram / WhatsApp channels, NLP intent parsing)
-- Fiat on/off-ramp integration
-- Cross-chain transactions
+- Backend lending-protocol adapters (Kamino, Save) so agents call `/v1/deposit` / `/v1/withdraw` with `{token, amount}` instead of raw `cpi_data` bytes, and responses surface `current_apy` / `yield_earned`.
+- Incoming-payment notifications (`payment.received` webhook) via a wallet monitor that subscribes to every agent ATA over `connection.onAccountChange`.
+- Anomaly webhook fan-out (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, `policy.limit_exceeded_attempt`, `policy.whitelist_violation`, `policy.whitelist_expiring`) — including a scheduled job for the TTL-expiring alert.
+- Dashboard surfaces for `update_agent_limits`, `emergency_withdraw`, and `update_backend_operator`.
+- Budget pool — orchestrator sets shared budget ceiling across agent fleet.
+- Multi-sig for high-value operations (require orchestrator co-sign above threshold).
+- Human custody model (SMS / Telegram / WhatsApp channels, NLP intent parsing).
+- Fiat on/off-ramp integration.
+- Cross-chain transactions.
 
 ---
 

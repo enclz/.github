@@ -12,8 +12,9 @@
 | Wallet (Orchestrator) | Solana wallet adapter — Solflare adapter explicitly registered, others via Wallet Standard auto-detection |
 | Orchestrator auth | Sign-In-With-Solana (`supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })`) → Supabase JWT. Same ceremony for browser and Node. |
 | REST API (agents + orchestrator) | Fastify 4 · Bearer token auth (Supabase JWT for orchestrator, agent API key for agents) · webhook callbacks |
-| MCP Server | TypeScript · `@modelcontextprotocol/sdk` · stdio transport |
-| DEX aggregator | Jupiter API v6 |
+| MCP Server | TypeScript · `@modelcontextprotocol/sdk` · stdio transport · package `@enclz/mcp` |
+| DEX aggregator | Jupiter API · default base `https://lite-api.jup.ag/swap/v1` (override via `JUPITER_BASE_URL`) |
+| Payment protocol | x402 v1 & v2 (orchestrator-delegated SPL Token `Approve`; backend partial-signs `TransferChecked`, facilitator settles) |
 | RPC provider | QuickNode |
 
 ---
@@ -357,42 +358,53 @@ Owner-only. Rotates the authorized backend keypair.
 
 ```
 server/
-  index.js                   // Fastify entry point — registers routes, force-instantiates Solana client at boot
+  index.js                   // Fastify entry point — registers token-registry + activation routes, force-instantiates Solana + x402 delegate clients at boot
+  app.js                     // buildApp() — registers swagger + every /api/v1/* schema-annotated route; reused by the openapi.json generator
   routes/
-    agent.js                 // all /v1/* agent endpoints (register, transfer, swap, deposit, withdraw, simulate, balance, limits, history, webhooks)
-    orchestrator.js          // four credential-minting endpoints (see §"Orchestrator Endpoints")
+    agent.js                 // /v1/* agent endpoints (register, transfer, swap, deposit, withdraw, simulate, balance, limits, history, webhooks)
+    orchestrator.js          // orchestrator endpoints: createAgent · mintAgentInvitation · rotateAgentKey · revokeAgentKey · registerFleetWebhook · listGroupTokens · addGroupToken · deleteGroupToken · seedDefaultTokens
+    activate.js              // public agent onboarding — GET /:token (Markdown landing) + POST /api/v1/onboard/:token (single-use bash CLI drop)
+    x402-history.js          // GET /v1/orchestrator/groups/:group_config_pda/x402/history · GET /…/x402/stats
   lib/
     auth.js                  // resolveAgentFromKey · resolveUserFromJwt · requireGroupAccess preHandler
     db.js                    // getServiceClient() singleton (service-role, bypasses RLS); throws at module load if Supabase env vars are missing
     solana.js                // cached getConnection() · getOperator() · getProgram()
     intents.js               // executeTransfer · executeSwap · executeLendingOp (with one nonce-mismatch resync + retry)
-    jupiter.js               // Jupiter v6 quote + swap-instructions wrapper
+    jupiter.js               // Jupiter quote + swap-instructions wrapper (default base `lite-api.jup.ag/swap/v1`)
     onchain-fleet.js         // getGroupConfig · getAgentWallet · listAgentsForGroup · decodeFixed32
     onchain-verify.js        // confirmTx · verifyAgentWallet · verifyWhitelistEntry (used by the agent-creation endpoint)
+    group-tokens.js          // loadTokenMeta — backend cache of (group_config_pda, mint) → {symbol, decimals, label} from `group_tokens` (60s TTL)
+    invitations.js           // mintInvitation · redeemInvitation — single-use `on<8alphanumeric>` codes hashed with bcrypt
+    x402-pay.js              // POST /v1/x402/pay handler: decode v1/v2 challenges, partial-sign TransferChecked with delegate keypair, return follow-up
+    x402-v1.js / x402-v2.js  // version-specific challenge parsers + follow-up envelope builders
     pda.js                   // groupConfigPda · agentWalletPda · whitelistEntryPda derivation
     policy.js                // computeFee (10 bps) — only function called on the request path. TEMPLATES, applyTemplate, preflightCheck, anomalyCheck remain as helper exports for tests/tooling but are NOT invoked by route handlers.
+    schemas.js               // JSON Schemas for every /api/v1/* route — single source of truth for `openapi.json`
     webhooks.js              // dispatchWebhook (fire-and-forget HMAC-signed events, refuses redirects)
     url-safety.js            // validateWebhookUrl (DNS rebinding protection)
     idempotency.js           // reserveOrAwait → complete/release pattern; PK is (key, agent_wallet_pda)
-    anchor-errors.js         // façade re-exporting the program's 6000–6013 discriminants from shared/anchor-errors.js
+    anchor-errors.js         // façade re-exporting the program's 6000–6013 discriminants; exports agentSafeError that sanitizes on-chain internals off the agent wire
     crypto.js                // generateApiKey · hashSecret · verifySecret · generateInviteCode · signWebhookPayload
 
 src/                         // SPA — see §"Web App"
   lib/
     anchor-client.js         // useEnclzProgram() — wallet-bound Anchor Program for orchestrator on-chain mutations
     onchain-fleet.js         // listAgentsForGroup · listWhitelistEntries · getGroupConfig · getAgentWallet (mirror of server/lib/onchain-fleet.js)
-    api.js                   // thin fetch wrapper attaching the Supabase JWT, used only for the four Fastify endpoints
+    api.js                   // thin fetch wrapper attaching the Supabase JWT, used by the orchestrator REST surface (credentials, token registry, x402 history/stats)
+    quicknode.js             // shared `Connection` instance, SWR-style caches, accountSubscribe helpers for the dashboard
 
-mcp/                         // MCP server — separate package, client of Agent REST API (NOT YET IMPLEMENTED)
-  index.ts                   // entry point — creates MCP server, registers tools, starts stdio transport
-  tools.ts                   // tool definitions: input schemas + handler functions
-  client.ts                  // thin HTTP client wrapping Agent REST API (uses ENCLZ_API_URL + ENCLZ_API_KEY)
-  package.json               // { "name": "@enclz/mcp-server", "bin": { "enclz-mcp": "./dist/index.js" } }
+mcp/                         // @enclz/mcp — standalone TypeScript package, MCP stdio transport
+  index.ts                   // entry: ENCLZ_API_KEY + ENCLZ_API_URL env, register 5 tools + 3 resources, stdio MCP server
+  tools.ts                   // bare-named tools (no `enclz_` prefix): `transfer`, `swap`, `deposit`, `withdraw`, `simulate` — input schemas derived from `openapi.json`
+  resources.ts               // MCP resources: `enclz://balance`, `enclz://limits`, `enclz://history` (read-only views over GET endpoints)
+  client.ts                  // thin HTTP client wrapping Agent REST API
+  generated/                 // build artifacts derived from ../openapi.json
+  package.json               // { "name": "@enclz/mcp", "bin": { "enclz-mcp": "./dist/index.js" } }
 ```
 
 ### Registry Data Model
 
-The chain is the source of truth for groups, agents, and whitelist entries — there are no mirror tables. The database holds only state the chain doesn't model: bcrypt-hashed credentials, one-time invitation codes, webhook subscribers, and the idempotency cache. All four surviving tables are keyed on base58 PDAs (text), not UUIDs, and have RLS enabled with no policies attached (service-role only).
+The chain is the source of truth for groups, agents, and whitelist entries. The database holds state the chain doesn't model: bcrypt-hashed credentials, one-time invitation codes, webhook subscribers, the idempotency cache, the per-group SPL token catalogue, and the x402 payment audit log. Every table is keyed on base58 PDAs (text) and is service-role only — Fastify uses the service-role client, which bypasses RLS.
 
 ```js
 // agent_credentials table
@@ -434,17 +446,41 @@ The chain is the source of truth for groups, agents, and whitelist entries — t
   created_at:        Date,
   expires_at:        Date,     // 24h after creation; cleanup_idempotency_cache() drops stale rows
 }
+
+// group_tokens table  (PK: (group_config_pda, mint))
+{
+  group_config_pda:  string,   // base58
+  mint:              string,   // base58 SPL mint
+  symbol:            string,   // "USDC", "PYUSD", etc.
+  decimals:          number,   // 0..18, re-verified on insert via getMint(connection, mint)
+  label:             string,   // optional human label
+  added_at:          Date,
+}
+
+// x402_transactions table  (PK: id — uuid)
+{
+  id:                string,   // uuid
+  group_config_pda:  string,   // base58
+  agent_wallet_pda:  string,   // base58
+  resource_url:      string,   // resource the agent paid for
+  amount:            string,   // atomic units (numeric / bigint), denominated in `mint`
+  mint:              string,   // base58 SPL mint
+  pay_to:            string,   // base58 — recipient ATA / wallet from the challenge
+  x402_version:      string,   // "v1" | "v2"
+  tx_sig:            string,   // base58 of the delegate's ed25519 signature over the partial-signed tx (nullable)
+  created_at:        Date,
+}
 ```
 
-There is no `groups`, `agents`, or `whitelist_entries` table. The SPA enumerates fleet metadata via Anchor account fetchers (`program.account.agentWallet.all` filtered by `memcmp` on the `group` field; `program.account.whitelistEntry.all` filtered on `added_by`) — see `src/lib/onchain-fleet.js`. The backend reads the same accounts on demand via `server/lib/onchain-fleet.js`.
+The SPA enumerates fleet metadata via Anchor account fetchers (`program.account.agentWallet.all` filtered by `memcmp` on the `group` field; `program.account.whitelistEntry.all` filtered on `added_by`) — see `src/lib/onchain-fleet.js`. The backend reads the same accounts on demand via `server/lib/onchain-fleet.js`.
 
 ### Policy Enforcement
 
-Limits and whitelist enforcement live exclusively on-chain. The backend does NOT run a server-side preflight on the request path — it submits the Anchor instruction directly and surfaces the program's custom error codes (6000–6013) as HTTP errors via `parseAnchorError`. The chain is the only authority; mirroring the rules in JavaScript was a source of drift, so it was removed.
+Limits and whitelist enforcement live exclusively on-chain. The backend submits the Anchor instruction directly and surfaces the program's custom error codes (6000–6013) as HTTP errors via `parseAnchorError`. The chain is the only authority.
 
-`server/lib/policy.js` exports `computeFee` (10 bps protocol fee) — the only function called on the request path. `TEMPLATES`, `applyTemplate`, `preflightCheck`, and `anomalyCheck` are kept as helper exports for tests and tooling but are NOT invoked by route handlers. Anomaly events (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, etc.) require these helpers to be re-attached to the post-execution path; until then those webhooks do not fire.
+`server/lib/policy.js` exports `computeFee` (10 bps protocol fee) — the only policy function on the request path. `TEMPLATES` and `applyTemplate` are helper exports for tests and the policy-template UI.
 
-After a confirmed `execute_transfer` / `execute_swap` / `execute_lending_op`, the backend re-fetches the on-chain `AgentWallet` account to populate `daily_remaining` / `hourly_tx_remaining` in the response — there is no JS mirror to read.
+After a confirmed `execute_transfer` / `execute_swap` / `execute_lending_op`, the backend re-fetches the on-chain `AgentWallet` account to populate `daily_remaining` / `hourly_tx_remaining` in the response.
 
 ### Policy Templates
 
@@ -510,8 +546,6 @@ idempotency.complete(key, agent_wallet_pda, response)
 dispatchWebhook(agent_wallet_pda, 'transfer.confirmed' | 'swap.confirmed', payload)
 ```
 
-Anomaly thresholds (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, `policy.limit_exceeded_attempt`, `policy.whitelist_violation`, `policy.whitelist_expiring`) and the `payment.received` webhook are not yet wired on the request path. They require, respectively, calling `anomalyCheck` after re-fetching on-chain state, hooking the Anchor error path for rejection events, a scheduled job for TTL-expiring alerts, and a wallet monitor (`onAccountChange` subscriptions to every agent ATA).
-
 ### Wallet Monitor
 
 On backend startup, subscribes to every registered agent wallet ATA via QuickNode websocket (`connection.onAccountChange`). On balance increase, dispatches `payment.received` webhook to the agent's registered webhook URL.
@@ -545,7 +579,7 @@ All `/v1/orchestrator/*` endpoints require:
 Authorization: Bearer <supabase_jwt>
 ```
 
-The JWT is issued by `supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })` — the same Sign-In-With-Solana ceremony used by the browser SPA and headless Node scripts. There is no separate orchestrator API key.
+The JWT is issued by `supabase.auth.signInWithWeb3({ chain: 'solana', wallet, statement })` — the same Sign-In-With-Solana ceremony used by the browser SPA and headless Node scripts. Wallet ownership IS the orchestrator credential.
 
 `requireGroupAccess` preHandler:
 1. Validates the JWT via `db.auth.getUser(token)` (5-minute in-memory cache).
@@ -553,46 +587,59 @@ The JWT is issued by `supabase.auth.signInWithWeb3({ chain: 'solana', wallet, st
 3. Computes `groupConfigPda(walletPubkey).toBase58()` and compares it to the URL's `:group_config_pda` param.
 4. Rejects 403 on mismatch, 401 on malformed pubkey claim.
 
-There is no database join for ownership — the chain's PDA derivation IS the proof.
+The chain's PDA derivation IS the ownership proof.
 
 ---
 
 ### Orchestrator Endpoints
 
-The orchestrator REST surface is intentionally minimal: only credential-minting endpoints. Every other orchestrator action — creating a group, creating an agent on-chain, adding/renewing/removing whitelist entries, updating per-agent limits, emergency withdraw, rotating the backend operator — is performed by the orchestrator's wallet signing the corresponding Anchor instruction directly (Solflare in the browser, raw keypair in a Node script). The chain account is the persisted state; there is no mirror row to write.
+The orchestrator REST surface covers three concerns: minting / rotating / revoking one-time-visible plaintext secrets that the chain cannot model (invitation codes, agent API keys, webhook signing secrets), curating the per-group SPL token registry, and exposing the x402 payment audit log + aggregations. Every other orchestrator action — group creation, whitelist add/renew/remove, agent creation, per-agent limit updates, emergency withdraw, backend-operator rotation, x402 budget approvals — is performed by the orchestrator's wallet signing the corresponding Anchor (or SPL Token) instruction directly (Solflare in the browser, raw keypair in a Node script). The chain account is the persisted state.
 
 URL path params:
 - `:group_config_pda` — base58 `GroupConfig` PDA (every owner has exactly one group, since the PDA is `["group", owner_pubkey]`).
 - `:agent_wallet_pda` — base58 `AgentWallet` PDA.
+- `:mint` — base58 SPL mint, in token-registry DELETE.
 
 #### `POST /v1/orchestrator/groups/:group_config_pda/agents`
 
-Mint a one-time invitation code for an agent the orchestrator has just created on-chain. The orchestrator's wallet must have already signed and confirmed `add_agent`; this endpoint verifies the resulting `AgentWallet` PDA belongs to the route's group, then issues the invitation.
+Mint a one-time invitation code for an agent the orchestrator has just created on-chain. The orchestrator's wallet must have already signed and confirmed `add_agent`; this endpoint verifies the resulting `AgentWallet` PDA belongs to the route's group AND `AgentWallet.mint == token_mint` AND `(group_config_pda, token_mint)` exists in `group_tokens`, then issues the invitation.
 
 ```js
 // Request
 {
   "tx_sig":           "string",   // confirmed signature of the add_agent instruction
-  "agent_wallet_pda": "string"    // base58
+  "agent_wallet_pda": "string",   // base58
+  "token_mint":       "string"    // base58 — must equal AgentWallet.mint AND be registered in group_tokens
 }
 
 // Response 200
 {
   "agent_wallet_pda": "string",
-  "invitation_code":  "string"   // one-time, expires 24h, shown once
+  "invitation_code":  "string",  // `on<8 alphanumeric>` — one-time, expires 24h, shown once
+  "expires_at":       "string"   // ISO8601
 }
 
-// Response 400
-{ "error": "onchain_mismatch", "message": "agent_wallet_pda does not belong to :group_config_pda" }
+// Response 400 — error in { onchain_mismatch | token_mint_mismatch | token_not_in_registry }
+```
+
+`token_mint` is NOT persisted (the chain owns the binding via `AgentWallet.mint`); it is accepted purely to validate that the orchestrator's selection matches both the chain state and the registry.
+
+#### `POST /v1/orchestrator/groups/:group_config_pda/agents/:agent_wallet_pda/invitation`
+
+Re-mint an activation link for an existing agent. Any prior pending invitation for this agent is invalidated atomically so only the fresh code can be redeemed. Distinct from `rotate-key`, which also re-issues the underlying API key — this endpoint only re-issues the onboarding token.
+
+```js
+// Response 200
+{ "agent_wallet_pda": "string", "invitation_code": "string", "expires_at": "string" }
 ```
 
 #### `POST /v1/orchestrator/groups/:group_config_pda/agents/:agent_wallet_pda/rotate-key`
 
-Issue a new invitation code for an existing agent (e.g., after a suspected key compromise). Atomically revokes any prior credential and mints a fresh code.
+Revoke the existing credential and mint a new plaintext API key for the agent (e.g., after a suspected compromise). Single atomic transition.
 
 ```js
 // Response 200
-{ "agent_wallet_pda": "string", "invitation_code": "string" }
+{ "agent_wallet_pda": "string", "api_key": "string" }   // api_key shown once
 ```
 
 #### `POST /v1/orchestrator/groups/:group_config_pda/agents/:agent_wallet_pda/revoke`
@@ -621,6 +668,59 @@ Register a fleet-level webhook for policy events across all agents in the group.
 { "webhook_id": "string", "signing_secret": "string" }  // signing_secret shown once
 ```
 
+#### Token registry endpoints
+
+The per-group SPL token catalogue is the source of `{symbol, decimals, label}` lookups for the SPA, backend, and orchestrator. Mints listed here are the only ones agents may bind to at `add_agent` time. Each agent's bound mint is captured into `AgentWallet.mint` on-chain — the registry is metadata only.
+
+`GET /v1/orchestrator/groups/:group_config_pda/tokens` — list registry rows.
+
+```js
+// Response 200
+{ "tokens": [ { "mint": "string", "symbol": "string", "decimals": number, "label": "string", "added_at": "string" } ] }
+```
+
+`POST /v1/orchestrator/groups/:group_config_pda/tokens` — add a mint. The backend re-fetches `getMint(connection, mint)` and rejects `400 invalid_decimals` if the body's `decimals` doesn't match the on-chain value (defends against a client-side spoof that would silently break amount conversion). `400 invalid_mint` if the pubkey has no SPL token program owner.
+
+```js
+// Request
+{ "mint": "string", "symbol": "string", "decimals": number, "label": "string" }
+
+// Response 201
+{ "mint": "string", "symbol": "string", "decimals": number, "label": "string", "added_at": "string" }
+```
+
+`DELETE /v1/orchestrator/groups/:group_config_pda/tokens/:mint` — remove a mint. Refused `409 token_in_use` with a `bound_agent_count` field if any agent in the group has `AgentWallet.mint == :mint` (resolved on-chain via `listAgentsForGroup`). Otherwise `204`.
+
+`POST /v1/orchestrator/groups/:group_config_pda/seed-defaults` — convenience for the SPA / Node example: bulk-inserts the canonical devnet mints (USDC, PYUSD, etc.) into the registry, skipping rows already present. Returns the list of inserted entries.
+
+#### x402 orchestrator endpoints
+
+x402 budget state (the orchestrator's spending cap for autonomous HTTP-402 payments) is held on-chain as SPL Token delegation: the orchestrator signs `Approve` from the SPA pointing the platform delegate (pubkey derived from `X402_DELEGATE_KEYPAIR`) at their own ATA, with `delegated_amount` as the cap. The dashboard reads `TokenAccount.delegate / delegatedAmount / amount` live from chain.
+
+`GET /v1/orchestrator/groups/:group_config_pda/x402/history` — paginated x402 payment history. Query params `limit` (default 50, max 200) and `offset` (default 0).
+
+```js
+// Response 200
+{
+  "transactions": [
+    { "id": "string", "agent_wallet_pda": "string", "resource_url": "string", "amount": "string", "mint": "string", "pay_to": "string", "tx_sig": "string", "x402_version": "string", "created_at": "string" }
+  ],
+  "total":  number,
+  "limit":  number,
+  "offset": number
+}
+```
+
+`GET /v1/orchestrator/groups/:group_config_pda/x402/stats` — trailing-30-day aggregations bucketed by `(resource_url, mint)` and `(UTC date, mint)`. Amounts in atomic units; the caller scales to human units using the registry decimals for each `mint`.
+
+```js
+// Response 200
+{
+  "endpoints": [ { "url": "string", "mint": "string", "total_spent": "string", "tx_count": number, "last_used": "string" } ],
+  "daily":     [ { "date":  "string", "mint": "string", "total_spent": "string", "tx_count": number } ]
+}
+```
+
 #### Orchestrator actions performed on-chain (no REST endpoint)
 
 | Action | Anchor instruction | Signed by |
@@ -638,11 +738,27 @@ These are signed via `useEnclzProgram()` in the SPA (`src/lib/anchor-client.js`)
 
 ---
 
+### Agent Activation (Public)
+
+The canonical agent-onboarding flow is a single URL the orchestrator shares with the agent: `https://enclz.com/on<8 alphanumeric>`. The agent (or a human pasting the URL into a terminal) follows two routes:
+
+#### `GET /:token` — Markdown landing
+
+Returns a Markdown response (`Content-Type: text/markdown; charset=utf-8`, `Cache-Control: no-store`) describing how to install the bash CLI. Side-effect free: multiple GETs with the same token return identical bodies regardless of redemption state. No DB writes.
+
+#### `POST /api/v1/onboard/:token` — single-use installer
+
+Atomically redeems the matching `agent_invitations` row (sets `used = true`), mints a fresh agent API key, persists its bcrypt hash to `agent_credentials`, and returns an executable bash script (`Content-Type: text/x-shellscript; charset=utf-8`). The script begins with `#!/usr/bin/env bash` and embeds three single-quoted constants: `_K=<api_key>`, `_U=https://enclz.com`, `_P=<agent_wallet_pda>`. Pipe straight to `bash` to install `~/.local/bin/enclz`; the script never enters the agent's context.
+
+The installed CLI is a thin curl wrapper. The first positional argument is the endpoint path (relative to `/api/v1/`), the optional second is a raw JSON body. With a body it POSTs `Content-Type: application/json`; without one it GETs. All requests carry `Authorization: Bearer <api_key>` and `X-Enclz-Version: 0.1.0`. The CLI also recognizes `enclz wallet` (prints `_P`), `enclz help`, and `enclz x402/pay '<challenge>' [--v1|--v2] [--idempotency-key <key>]`. Idempotency keys are auto-generated (UUID) when not supplied.
+
+Single-use: a second POST with the same token returns `404 invalid_or_expired_token`. Tokens expire 24h after mint. `POST /api/v1/onboard/:token?api_url=<url>` is honored only when the request's `Host` header is `localhost:*` / `127.0.0.1:*` — production silently drops the override.
+
 ### Agent Endpoints
 
 #### `POST /v1/register`
 
-Exchange one-time invitation code for an API key. Code invalidated immediately after use.
+Direct JSON exchange of an invitation code for an API key, for orchestrators that mint the credential without using the activation URL (e.g. headless automation). Same single-use semantics as the activation flow's POST step; the response is JSON `{ agent_wallet_pda, api_key }` instead of a bash script.
 
 ```js
 // Request
@@ -657,17 +773,17 @@ Exchange one-time invitation code for an API key. Code invalidated immediately a
 
 #### `POST /v1/transfer`
 
-Transfer tokens to a whitelisted address.
+Transfer tokens to a whitelisted address. The mint is sourced from `AgentWallet.mint` (chain-loaded by `resolveAgentFromKey`); decimals from the `group_tokens` registry. The optional `mint` body field is accepted only as a hint and ignored when it disagrees with `AgentWallet.mint` — the bound mint is canonical.
 
 ```js
 // Request
 {
   "to":               "string",   // base58 Solana address — must be whitelisted
-  "amount":           number,     // token units (e.g. 2.50 for 2.50 USDC)
-  "token":            "string",   // "USDC" | "SOL" | "PUSD"
+  "amount":           number,     // human units (e.g. 2.50 for 2.50 USDC)
+  "mint":             "string",   // optional override / hint; ignored if it disagrees with AgentWallet.mint
   "memo":             "string",   // optional — stored with transaction
   "task_id":          "string",   // optional — orchestrator-defined task reference
-  "idempotency_key":  "string"    // optional; same key = same response, no re-execution
+  "idempotency_key":  "string"    // required (header `Idempotency-Key` also accepted)
 }
 
 // Response 200
@@ -696,16 +812,22 @@ Transfer tokens to a whitelisted address.
 
 #### `POST /v1/swap`
 
-Swap tokens via the whitelisted Jupiter router. Swap router is whitelisted at group initialization.
+Swap tokens via the whitelisted Jupiter router. Swap router is whitelisted at group initialization. Both mints are validated against the `group_tokens` registry so the backend has known decimals for `amount`. The `from_token` / `to_token` symbol fields stand alongside `from_mint` / `to_mint` purely for human readability — the mint pubkeys are canonical.
+
+The on-chain v0.3.0 `execute_swap` enforces custody via `to_token_account.owner == agent_wallet.key()` and does NOT pin the input mint to `AgentWallet.mint` — agents that have accumulated a non-bound mint can swap it back out. Daily limits are NOT touched on the swap path (denominated only in the bound mint), so swap responses omit `daily_remaining` but still include `hourly_tx_remaining`.
 
 ```js
 // Request
 {
-  "from_token":       "string",
-  "to_token":         "string",
-  "amount":           number,
-  "task_id":          "string",    // optional
-  "idempotency_key":  "string"     // optional
+  "from_token":         "string",   // human symbol, e.g. "USDC"
+  "to_token":           "string",   // human symbol, e.g. "SOL"
+  "from_mint":          "string",   // base58 — must be in group_tokens
+  "to_mint":            "string",   // base58 — must be in group_tokens
+  "amount":             number,     // human units of `from_mint`
+  "minimum_amount_out": number,     // optional; defaults to aggregator quote
+  "slippage_bps":       number,     // optional; default 50
+  "task_id":            "string",   // optional
+  "idempotency_key":    "string"    // required
 }
 
 // Response 200
@@ -714,7 +836,6 @@ Swap tokens via the whitelisted Jupiter router. Swap router is whitelisted at gr
   "status":              "confirmed",
   "received_amount":     number,
   "rate":                number,
-  "daily_remaining":     number,
   "hourly_tx_remaining": number
 }
 ```
@@ -723,33 +844,28 @@ Swap tokens via the whitelisted Jupiter router. Swap router is whitelisted at gr
 
 Deposit tokens into a whitelisted lending protocol.
 
-> **Current shape (pass-through CPI).** The backend does not yet wrap a Kamino/Save adapter, so the agent supplies the lending program's pubkey AND the prebuilt CPI instruction bytes. The backend validates the lending program is whitelisted (`entry_type = 2`) for the agent's group and submits `execute_lending_op(0, ...)` to the Enclz program, which CPI-invokes the lending program with `cpi_data`. The "no SDK / no crypto knowledge required" promise lands when a backend adapter is added (see deferred work).
+Pass-through CPI shape: the agent supplies the lending program's pubkey AND the prebuilt CPI instruction bytes. The backend validates the lending program is whitelisted (`entry_type = 2`) for the agent's group and submits `execute_lending_op(0, ...)` to the Enclz program, which CPI-invokes the lending program with `cpi_data`. The mint comes from `AgentWallet.mint` (chain-loaded).
 
 ```js
 // Request
 {
-  "lending_program":  "string",   // base58 — must be whitelisted entry_type = 2 for this agent's group
+  "lending_program":  "string",     // base58 — must be whitelisted entry_type = 2 for this agent's group
   "amount":           number,
-  "cpi_data":         "string",   // base64-encoded CPI instruction bytes for the lending program
-  "task_id":          "string",   // optional
-  "idempotency_key":  "string"    // optional
+  "cpi_data":         [number],     // raw instruction bytes (array of 0..255) forwarded verbatim to the lending program
+  "task_id":          "string",     // optional
+  "idempotency_key":  "string"      // required
 }
 
 // Response 200
 {
-  "tx_sig":               "string",
-  "status":               "confirmed",
-  "lending_program":      "string",
-  "deposited_amount":     number,
-  "daily_remaining":      number,
-  "hourly_tx_remaining":  number
+  "tx_sig":           "string",
+  "status":           "confirmed",
+  "deposited_amount": number
 }
 
 // Response 403
 { "error": "whitelist_violation" | "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded" }
 ```
-
-`current_apy` is not yet populated (no APY oracle wired); will be added when a backend adapter lands.
 
 #### `POST /v1/withdraw`
 
@@ -760,60 +876,52 @@ Withdraw tokens from a whitelisted lending protocol. Same pass-through CPI shape
 {
   "lending_program":  "string",
   "amount":           number,
-  "cpi_data":         "string",   // base64-encoded CPI instruction bytes
+  "cpi_data":         [number],
   "task_id":          "string",
   "idempotency_key":  "string"
 }
 
 // Response 200
 {
-  "tx_sig":               "string",
-  "status":               "confirmed",
-  "lending_program":      "string",
-  "received_amount":      number,
-  "daily_remaining":      number,
-  "hourly_tx_remaining":  number
+  "tx_sig":          "string",
+  "status":          "confirmed",
+  "received_amount": number
 }
 
 // Response 403
 { "error": "whitelist_violation" | "insufficient_balance" }
 ```
 
-`yield_earned` is not yet populated (no yield-tracking wired); will be added with the backend adapter.
-
 #### `POST /v1/intents/simulate`
 
-Dry-run check: would this transfer/swap succeed? No transaction submitted, no state changed.
+Dry-run check: would this transfer succeed? Mirrors `/v1/transfer` and surfaces policy violations as `reason` plus the agent's remaining headroom. Implemented via `connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' })` against the same instruction `/v1/transfer` would build, so the on-chain enforcement path is exercised. No transaction submitted; no body `mint` field — the bound mint comes from `AgentWallet.mint`.
 
 ```js
-// Request — same body shape as /v1/transfer or /v1/swap
+// Request
 {
-  "action":  "transfer" | "swap",
-  "to":      "string",           // for transfer
-  "amount":  number,
-  "token":   "string",
-  "from_token": "string",        // for swap
-  "to_token":   "string"         // for swap
+  "to":     "string",   // optional — when omitted, the simulation tests pure spend-headroom and protocol fee math
+  "amount": number,
+  "mint":   "string"    // optional override; ignored if it disagrees with AgentWallet.mint
 }
 
 // Response 200
 {
-  "would_succeed":      boolean,
-  "reason":             null | "whitelist_violation" | "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded" | "insufficient_balance",
-  "daily_remaining":    number,
+  "would_succeed":       boolean,
+  "reason":              null | "whitelist_violation" | "daily_limit_exceeded" | "per_tx_limit_exceeded" | "hourly_cap_exceeded" | "insufficient_balance",
+  "daily_remaining":     number,
   "hourly_tx_remaining": number,
-  "estimated_fee":      number    // protocol fee in USDC
+  "estimated_fee":       number    // protocol fee in the bound mint's human units
 }
 ```
 
 #### `GET /v1/balance`
 
-Current balances and spend headroom.
+Current balances and spend headroom. Balances are keyed by symbol; the backend enumerates the group's `group_tokens` registry, computes each agent ATA, and reads `getMultipleAccountsInfo` for native SOL and SPL token amounts (one entry per registered mint plus `"SOL"` for native lamports).
 
 ```js
 // Response 200
 {
-  "balances": { "USDC": number, "SOL": number, "PUSD": number },
+  "balances": { "<symbol>": number, ... },
   "daily_limit":         number,
   "daily_remaining":     number,
   "per_tx_limit":        number,
@@ -884,6 +992,57 @@ Register callback URL for async transaction confirmations and policy events for 
 
 // Response 200
 { "webhook_id": "string", "signing_secret": "string" }   // signing_secret shown once
+```
+
+#### `POST /v1/x402/pay` — orchestrator-delegated payment
+
+Resolves an x402 HTTP 402 Payment Required challenge using the orchestrator's pre-approved SPL Token delegation. The agent submits the verbatim challenge string (v1 raw JSON or v2 base64-encoded `PAYMENT-REQUIRED` header value — encoding is auto-detected); the backend decodes, validates the scheme is `exact` on a Solana network, looks up the challenge's `asset` mint against the group's `group_tokens` registry (decimals required for v2's human `amount` and v1's `maxAmountRequired` conversion), reads the orchestrator's ATA `delegate / delegatedAmount / amount` live from chain, and rejects with `402 x402_budget_not_configured | x402_budget_exhausted | insufficient_x402_budget` when the delegation is missing or insufficient.
+
+On success the backend builds a V0 transaction `[ComputeBudget SetLimit, ComputeBudget SetPrice, Token TransferChecked]` with the orchestrator's budget ATA as source, the challenge's `payTo` ATA as destination, the platform delegate (pubkey derived from `X402_DELEGATE_KEYPAIR`) as TransferChecked authority, and the challenge's `extra.feePayer` as the transaction fee payer. The delegate partial-signs; the fee-payer signature slot is left empty. The signed offer is recorded in `x402_transactions`. The response carries a `follow_up` envelope the agent attaches to its retry request — the x402 facilitator on the resource server's side asserts the transaction is fully signed (signing as fee payer itself) and submits it on chain. The backend does NOT call `sendRawTransaction`.
+
+```js
+// Request
+{
+  "challenge":       "string",   // verbatim v1 JSON or v2 base64; auto-detected
+  "version":         "v1"|"v2",  // optional override; auto-detected from x402Version field otherwise
+  "idempotency_key": "string"    // optional
+}
+
+// Response 200
+{
+  "accepted": true,
+  "follow_up": {
+    "url":     "string",   // resource URL from the challenge
+    "headers": { "X-PAYMENT": "string" }            // v1, base64-wrapped PaymentPayload
+              | { "PAYMENT-SIGNATURE": "string" }   // v2
+  }
+}
+
+// Response 400 — { invalid_challenge | scheme_unsupported | token_not_in_registry }
+// Response 402 — { x402_budget_not_configured | x402_budget_exhausted | insufficient_x402_budget }
+```
+
+#### `POST /v1/x402/proxy` — agent-funded payment via `execute_transfer`
+
+Alternative x402 resolution that pays directly from the agent's own wallet, subject to the on-chain whitelist and spend-policy ceiling (not the orchestrator's delegated allowance). The backend parses the v2 `PaymentRequired` body, ensures `scheme === "exact"` and `network` starts with `solana:`, then submits `executeTransfer` via the standard intent pipeline using the agent's resolved context (bound mint + registry decimals). The challenge's `payTo` must already be on the agent's whitelist; otherwise the on-chain program rejects with `whitelist_violation` and the proxy surfaces it through `agentSafeError`. Returns the confirmed `tx_sig` as proof of payment.
+
+```js
+// Request
+{
+  "challenge":       { ... },     // x402 v2 PaymentRequired object
+  "idempotency_key": "string"     // optional
+}
+
+// Response 200
+{
+  "tx_sig":              "string",
+  "accepted":            { ... },  // the matched payment requirement
+  "daily_remaining":     number,
+  "hourly_tx_remaining": number
+}
+
+// Response 400 — { invalid_challenge | scheme_unsupported }
+// Response 403 — propagated from execute_transfer (whitelist / limits)
 ```
 
 ### Webhook Event Payloads
@@ -1005,9 +1164,22 @@ HTTP status codes: `400` bad request, `401` unauthorized, `403` policy violation
 | `insufficient_deposit_balance` | 403 | Withdraw amount exceeds protocol deposit |
 | `insufficient_balance` | 403 | Agent wallet has insufficient token balance |
 | `idempotency_conflict` | 409 | Same idempotency key used with different parameters |
+| `idempotency_in_progress` | 409 | Concurrent retry: the prior request is still running |
+| `token_not_in_registry` | 400 | Mint absent from the group's `group_tokens` registry |
+| `invalid_decimals` | 400 | Body `decimals` doesn't match `getMint` on chain |
+| `invalid_mint` | 400 | Pubkey is not a real SPL mint |
+| `token_in_use` | 409 | Token registry DELETE refused — at least one agent has `AgentWallet.mint == :mint` |
+| `validation_error` | 400 | JSON Schema rejection; `details[]` names each failing field path |
+| `scheme_unsupported` | 400 | x402 challenge scheme is not Solana `exact` |
+| `invalid_challenge` | 400 | x402 challenge missing required fields or malformed |
+| `x402_budget_not_configured` | 402 | Orchestrator has not approved the platform delegate on the challenge asset |
+| `x402_budget_exhausted` | 402 | Cumulative offers would exceed the orchestrator's `delegatedAmount` |
+| `insufficient_x402_budget` | 402 | Budget ATA `amount < amount_in` |
+| `x402_delegate_mismatch` | 400 | Budget ATA `delegate` is set but doesn't match the platform delegate |
+| `jupiter_unavailable` | 502 | Jupiter quote / swap-instructions endpoint failed |
 | `submission_failed` | 503 | Transient RPC or network failure; retry with same idempotency key |
-| `nonce_mismatch` | 500 | Backend operator nonce out of sync with on-chain state — backend resyncs and retries internally |
-| `internal_error` | 500 | Unexpected backend or chain error |
+| `nonce_mismatch` | (internal) | Consumed by the backend's `resolveNonceMismatch` retry path — never on the agent wire. Leaks past retry surface as `internal_error` |
+| `internal_error` | 500 / 502 | Unexpected backend or chain error |
 
 ---
 
@@ -1035,26 +1207,35 @@ Location: served at `https://enclz.com/SKILL.md` (canonical)
 
 ### MCP Server
 
-TypeScript package publishing Enclz operations as native MCP tools. Installed once; any MCP-enabled runtime discovers tools automatically.
+TypeScript package publishing Enclz operations as native MCP tools and resources. Installed once; any MCP runtime discovers tools and resources automatically.
 
-**Package:** `@enclz/mcp-server`  
+**Package:** `@enclz/mcp`  
 **Transport:** stdio (standard MCP)  
-**Config:** two env vars — `ENCLZ_API_KEY` (agent API key from registration) and `ENCLZ_API_URL` (default: `https://api.enclz.com`)
+**Config:** two env vars — `ENCLZ_API_KEY` (agent API key from registration) and `ENCLZ_API_URL` (default: `https://enclz.com`)
 
-**Tools exposed:**
+Mutating operations are exposed as MCP **tools**; read-only queries are exposed as MCP **resources** (with `mimeType: application/json`). Tool names are bare — MCP clients namespace by server name, so the redundant `enclz_` prefix from earlier drafts has been dropped. Input schemas are generated from `openapi.json` at build time (`mcp/generated/schemas.ts`); the build fails if `openapi.json` is missing.
 
-| Tool name | Maps to | Description |
-|---|---|---|
-| `enclz_transfer` | `POST /v1/transfer` | Transfer tokens to a whitelisted address |
-| `enclz_swap` | `POST /v1/swap` | Swap tokens via Jupiter |
-| `enclz_deposit` | `POST /v1/deposit` | Deposit into a whitelisted lending protocol |
-| `enclz_withdraw` | `POST /v1/withdraw` | Withdraw from a whitelisted lending protocol |
-| `enclz_simulate` | `POST /v1/intents/simulate` | Dry-run: would this transfer/swap succeed? |
-| `enclz_balance` | `GET /v1/balance` | Token balances and spend headroom |
-| `enclz_limits` | `GET /v1/limits` | Full spend policy and whitelist |
-| `enclz_history` | `GET /v1/history` | Paginated transaction log |
+**Tools (5):**
 
-Each tool input schema mirrors the corresponding REST request body. Tool output returns the REST response JSON directly, plus a human-readable `summary` field for LLM reasoning.
+| Tool | Wraps endpoint |
+|---|---|
+| `transfer` | `POST /v1/transfer` |
+| `swap` | `POST /v1/swap` |
+| `deposit` | `POST /v1/deposit` |
+| `withdraw` | `POST /v1/withdraw` |
+| `simulate` | `POST /v1/intents/simulate` |
+
+**Resources (3):**
+
+| URI | Wraps endpoint |
+|---|---|
+| `enclz://balance` | `GET /v1/balance` |
+| `enclz://limits`  | `GET /v1/limits` |
+| `enclz://history` | `GET /v1/history` |
+
+Tool input schemas mirror the corresponding REST request body. Tool output returns the REST response JSON directly. The MCP server forwards `Idempotency-Key` when the tool input includes one, and surfaces non-2xx backend responses verbatim through MCP's tool-error envelope. Resource reads are not cached across calls.
+
+The agent-facing artifacts (`openapi.json`, `SKILL.md`, MCP tool/resource descriptions) describe the runtime in business terms only — strings like `Anchor`, `Solana`, `PDA`, `Custom program error`, `discriminant`, `onchain_error`, and `0x[0-9a-f]+` literals are forbidden by the artifact linter (`scripts/lint-agent-artifacts.mjs`).
 
 **Claude Desktop config example:**
 ```json
@@ -1062,10 +1243,10 @@ Each tool input schema mirrors the corresponding REST request body. Tool output 
   "mcpServers": {
     "enclz": {
       "command": "npx",
-      "args": ["-y", "@enclz/mcp-server"],
+      "args": ["-y", "@enclz/mcp"],
       "env": {
         "ENCLZ_API_KEY": "<agent-api-key>",
-        "ENCLZ_API_URL": "https://api.enclz.com"
+        "ENCLZ_API_URL": "https://enclz.com"
       }
     }
   }
@@ -1131,11 +1312,14 @@ The `:id` route param is the **base58 `group_config_pda`** (every owner has exac
 /setup                                         group setup wizard (wallet required from Step 2 onward)
 /group/:group_config_pda                       fleet dashboard (agents, spend overview, anomaly feed)
 /group/:group_config_pda/agents                agent list — status, daily spend, hourly rate, headroom
-/group/:group_config_pda/agents/new            add agent — template selection, limit config, invite code
+/group/:group_config_pda/agents/new            add agent — template selection, limit config, invite code (refuses to advance on empty token registry)
 /group/:group_config_pda/agents/:agent_wallet_pda   per-agent detail — audit log, policy, revoke/re-invite
 /group/:group_config_pda/whitelist             manage approved addresses — TTL/amount per external entry, renew/top-up actions
 /group/:group_config_pda/whitelist/new         add external address — set label, TTL, approved amount
+/group/:group_config_pda/tokens                per-group SPL token registry — add/remove mints, view bound-agent count
+/group/:group_config_pda/x402                  x402 payment dashboard — approval headline, Configure modal (SPL Token Approve/Revoke), 30-day spend chart, per-endpoint stats, recent payments
 /group/:group_config_pda/settings              fleet webhook config
+/on<8 alphanumeric>                            public agent activation landing (Markdown); paired with POST /api/v1/onboard/<token>
 ```
 
 ### Group Setup Wizard
@@ -1156,17 +1340,31 @@ Step 3: Configure group
         → SPA calls program.methods.initializeGroup(group_name, backend_operator, protocol_fee_wallet, dex_router) via useEnclzProgram() (signed by the orchestrator's wallet)
         → on chain failure: error banner with retry; PDA either created or not (idempotent)
 
-Step 4: Add first agent
-        → orchestrator enters display name, selects policy template
-        → SPA calls program.methods.addAgent(...) via useEnclzProgram() (signed by the orchestrator's wallet)
-        → after `confirmed`, SPA POSTs {tx_sig, agent_wallet_pda} to /v1/orchestrator/groups/:group_config_pda/agents to mint the invitation code
-        → on chain failure: error banner with retry
-        → system displays one-time invitation code
+Step 4: Curate the token registry
+        → orchestrator opens /group/:group_config_pda/tokens and adds at least one SPL mint
+        → SPA pastes a mint pubkey, reads decimals via getMint(connection, mint), POSTs {mint, symbol, decimals, label} to /v1/orchestrator/groups/:group_config_pda/tokens
+        → backend re-verifies decimals against on-chain getMint and rejects mismatches
+        → seed-defaults endpoint exists for one-click bulk insert of canonical devnet mints
+        → registry is required: agent creation refuses to advance with an empty registry
 
-Step 5: Configure whitelist
-        → DEX router auto-whitelisted (entry_type 2, permanent) at Step 3 via initialize_group's dex_router argument
-        → orchestrator adds external service addresses: label + TTL (days) + approved amount (USDC) — signed via useEnclzProgram()
-        → intra-group agent entry already present from Step 4 (entry_type 0, permanent, auto-added by add_agent)
+Step 5: Add first agent
+        → orchestrator enters display name, selects policy template, picks a token from the registry
+        → SPA calls program.methods.addAgent(...) via useEnclzProgram() (signed by the orchestrator's wallet), passing the selected mint into the AgentWallet ATA seed
+        → after `confirmed`, SPA POSTs {tx_sig, agent_wallet_pda, token_mint} to /v1/orchestrator/groups/:group_config_pda/agents to mint the invitation code
+        → backend asserts AgentWallet.mint == token_mint and the mint is registered before issuing the code
+        → on chain failure: error banner with retry
+        → system displays one-time invitation URL (https://enclz.com/on<token>) — the operator shares this string verbatim with the agent
+
+Step 6: Configure whitelist
+        → DEX router auto-whitelisted (entry_type 2, permanent) at Step 3 via initialize_group's dex_router argument (resolved from JUPITER_PROGRAM_ID)
+        → orchestrator adds external service addresses: label + TTL (days) + approved amount — signed via useEnclzProgram()
+        → intra-group agent entry already present from Step 5 (entry_type 0, permanent, auto-added by add_agent)
+
+Step 7 (optional): Approve x402 budget
+        → orchestrator opens /group/:group_config_pda/x402
+        → Configure modal builds one SPL Token Approve (or Revoke for 0) per dirty currency targeting VITE_X402_DELEGATE_PUBKEY
+        → orchestrator's wallet signs and submits the transaction
+        → after `confirmed`, the dashboard refetches on-chain delegation state and renders the new headline
 ```
 
 ---
@@ -1179,14 +1377,15 @@ Used by: Web app for wallet connection and on-chain signing. `WalletProviders` w
 The `useEnclzProgram()` hook (`src/lib/anchor-client.js`) returns a `Program<Enclz>` whose provider's wallet is the connected adapter — used to sign every on-chain orchestrator mutation.
 
 ### Jupiter API
-Base URL: `https://quote-api.jup.ag/v6`
+Base URL: `https://lite-api.jup.ag/swap/v1` (override via `JUPITER_BASE_URL`, e.g. `https://api.jup.ag/swap/v1` for paid mirrors)
 - `GET /quote?inputMint=&outputMint=&amount=&slippageBps=50`
-- `POST /swap` with quote → swap transaction (base64 serialized)
+- `POST /swap-instructions` → returns `{ swapInstruction: { data: <base64>, ... }, ... }`. The backend base64-decodes `swapInstruction.data` into the `routeData` Buffer the on-chain program CPI-invokes — serializing the whole JSON envelope is invalid.
 
-Token mints (mainnet):
-- USDC: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
-- SOL (wrapped): `So11111111111111111111111111111111111111112`
+Token mints are NOT hard-coded; each group's `group_tokens` registry is the source of truth for which mints agents may bind to. The default-seed endpoint is the only place canonical devnet mints are referenced.
+
+### x402 Facilitator
+The backend never talks to the facilitator directly. The agent embeds the backend's `follow_up.headers` (`X-PAYMENT` for v1, `PAYMENT-SIGNATURE` for v2) on its retry to the resource server, and the facilitator on the resource server's side asserts the transaction is fully signed (signing as fee payer itself) and submits via `sendAndConfirmSignedTransaction`. Enclz's role ends at the partial-sign.
 
 ### Solana RPC
 Provider: **QuickNode**
-Calls: `sendTransaction`, `getAccountInfo`, `getTokenAccountBalance`, `getSignaturesForAddress`, `onAccountChange` (websocket)
+Calls: `sendTransaction`, `getAccountInfo`, `getTokenAccountBalance`, `getSignaturesForAddress`, `getParsedTransactions`, `getMultipleAccountsInfo`, `onAccountChange` (websocket via `VITE_QUICKNODE_WSS_URL`). The SPA reads on-chain data directly — no Fastify proxy is in the dashboard read path. When no `VITE_QUICKNODE_RPC_URL` is configured, the SPA falls back to `https://api.devnet.solana.com` without a `wsEndpoint` (subscriptions disabled).

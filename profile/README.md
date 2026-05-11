@@ -19,12 +19,12 @@ Per-tx, daily, and hourly spend caps live in an Anchor program on Solana. Whitel
 
 ## Quickstart
 
-Paste this into Claude Desktop, Cursor, or any LLM agent. Replace `<token>` with the invitation URL your orchestrator hands you.
+Paste this into Claude Desktop, Cursor, or any LLM agent. Replace `on<8 chars>` with the activation token your orchestrator hands you (it already includes the `on` prefix).
 
 ```
 Read https://enclz.com/SKILL.md and follow the activation flow.
 
-I have an Enclz invitation URL: https://enclz.com/<token>
+I have an Enclz activation URL: https://enclz.com/on<8 chars>
 Provision the wallet, store the API key per the skill's hard rules,
 and confirm by reading enclz://balance and enclz://limits.
 
@@ -36,11 +36,11 @@ Do not move funds without simulating first.
 
 | Doc | What's in it |
 |---|---|
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Vision, principals, full feature list, user flows, security model, policy templates. |
-| [SPECIFICATION.md](SPECIFICATION.md) | Tech stack, Anchor accounts + instructions, REST endpoints, webhook payloads, error taxonomy, MCP server, web app routes. |
-| [RESEARCH.md](RESEARCH.md) | Validation sprint, demand signals, competitor map, risks. |
-| [MARKETING.md](MARKETING.md) | Positioning, personas, GTM, demo flow, competitive matrix. |
-| [decisions/](decisions/) | Architecture Decision Records — numbered, dated, one design choice each. |
+| [REQUIREMENTS.md](../REQUIREMENTS.md) | Vision, principals, full feature list, user flows, security model, policy templates. |
+| [SPECIFICATION.md](../SPECIFICATION.md) | Tech stack, Anchor accounts + instructions, REST endpoints, webhook payloads, error taxonomy, MCP server, web app routes. |
+| [RESEARCH.md](../RESEARCH.md) | Validation sprint, demand signals, competitor map, risks. |
+| [MARKETING.md](../MARKETING.md) | Positioning, personas, GTM, demo flow, competitive matrix. |
+| [decisions/](../decisions/) | Architecture Decision Records — numbered, dated, one design choice each. |
 
 ## Founder
 
