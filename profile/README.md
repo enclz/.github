@@ -40,8 +40,7 @@ Do not move funds without simulating first.
 | [SPECIFICATION.md](../SPECIFICATION.md) | Tech stack, Anchor accounts + instructions, REST endpoints, webhook payloads, error taxonomy, MCP server, web app routes. |
 | [RESEARCH.md](../RESEARCH.md) | Validation sprint, demand signals, competitor map, risks. |
 | [MARKETING.md](../MARKETING.md) | Positioning, personas, GTM, demo flow, competitive matrix. |
-| [decisions/](../decisions/) | Architecture Decision Records — numbered, dated, one design choice each. |
 
 ## Founder
 
-Denis Majus — [github.com/imajus](https://github.com/imajus) · [t.me/imajus](https://t.me/imajus) · [x.com/denismajus](https://x.com/denismajus)
+Denis Majus — [github](https://github.com/imajus) · [Telegram](https://t.me/imajus) · [X/Twitter](https://x.com/denismajus)
