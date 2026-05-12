@@ -160,7 +160,6 @@ Orchestrator registers a webhook for policy events across their fleet:
 - `policy.whitelist_violation` — agent attempted transfer to non-whitelisted address
 - `policy.whitelist_expiring` — a whitelist entry TTL expires within 24 hours (fires once)
 - `policy.whitelist_amount_threshold` — a whitelist entry has consumed 80% of its approved amount
-- `policy.whitelist_voided` — a whitelist entry was auto-voided (approved amount fully drained)
 
 Allows orchestrators to detect runaway agents or injection attacks without polling. Expiry and amount alerts give orchestrators time to re-approve before agents are blocked.
 
@@ -264,7 +263,7 @@ Rather than maintaining language-specific SDKs, Enclz ships three integration ar
 
 **MCP Server (`@enclz/mcp-server`)** — Model Context Protocol server wrapping the Agent REST API over stdio. Exposes 5 mutating tools (`transfer`, `swap`, `deposit`, `withdraw`, `simulate` — bare names, no `enclz_` prefix because MCP clients namespace by server name) and 3 read-only resources (`enclz://balance`, `enclz://limits`, `enclz://history`). Configured with two env vars: `ENCLZ_API_KEY` (issued at registration) and `ENCLZ_API_URL` (default `https://enclz.com`). Compatible with any MCP runtime: Claude Desktop, Cursor, Claude Code, or custom agents built with the MCP SDK.
 
-All three agent-facing surfaces describe the runtime in business terms only. On-chain rejections reach the agent as curated business codes (`whitelist_violation`, `daily_limit_exceeded`, etc.) plus human-readable remediation prose — the program's 6000–6013 discriminants are scrubbed by `agentSafeError`. A CI lint pass (`scripts/lint-agent-artifacts.mjs`) enforces this on `openapi.json`, `SKILL.md`, and the built MCP bundle.
+All three agent-facing surfaces describe the runtime in business terms only. On-chain rejections reach the agent as curated business codes (`whitelist_violation`, `daily_limit_exceeded`, etc.) plus human-readable remediation prose — the program's 6000–6015 discriminants are scrubbed by `agentSafeError`. A CI lint pass (`scripts/lint-agent-artifacts.mjs`) enforces this on `openapi.json`, `SKILL.md`, and the built MCP bundle.
 
 **Activation URL** is the canonical handoff — `https://enclz.com/on<token>` is what the orchestrator copies to the agent. The CLI installed by the activation URL is a thin curl wrapper, not a strongly-typed SDK; agents that prefer a typed surface use the MCP server.
 
@@ -318,7 +317,7 @@ The fee is charged to the sending agent's wallet at execution time, deducted fro
 
 - Backend lending-protocol adapters (Kamino, Save) so agents call `/v1/deposit` / `/v1/withdraw` with `{token, amount}` instead of raw `cpi_data` bytes, and responses surface `current_apy` / `yield_earned`.
 - Incoming-payment notifications (`payment.received` webhook) via a wallet monitor that subscribes to every agent ATA over `connection.onAccountChange`.
-- Anomaly webhook fan-out (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.whitelist_voided`, `policy.limit_exceeded_attempt`, `policy.whitelist_violation`, `policy.whitelist_expiring`) — including a scheduled job for the TTL-expiring alert.
+- Anomaly webhook fan-out (`policy.limit_threshold`, `policy.whitelist_amount_threshold`, `policy.limit_exceeded_attempt`, `policy.whitelist_violation`, `policy.whitelist_expiring`) — including a scheduled job for the TTL-expiring alert.
 - Dashboard surfaces for `update_agent_limits`, `emergency_withdraw`, and `update_backend_operator`.
 - Budget pool — orchestrator sets shared budget ceiling across agent fleet.
 - Multi-sig for high-value operations (require orchestrator co-sign above threshold).

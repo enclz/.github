@@ -2,7 +2,7 @@
 
 > One enclave per agent, one policy ceiling enforced on-chain.
 
-Per-tx, daily, and hourly spend caps live in an Anchor program on Solana. Whitelist entries auto-void on-chain when their TTL or approved-amount cap is consumed. The agent never holds a private key — it authenticates with a scoped API key and submits structured intents via REST or MCP. A fully exploited agent can only move funds to pre-approved addresses, up to pre-approved amounts — independent of any backend.
+Per-tx, daily, and hourly spend caps live in an Anchor program on Solana. Whitelist entries carry an on-chain TTL and approved-amount ceiling — once either limit is reached, further transfers to that address are rejected on-chain until the orchestrator renews. The agent never holds a private key — it authenticates with a scoped API key and submits structured intents via REST or MCP. A fully exploited agent can only move funds to pre-approved addresses, up to pre-approved amounts — independent of any backend.
 
 ## Verified engineering
 
@@ -10,7 +10,7 @@ Per-tx, daily, and hourly spend caps live in an Anchor program on Solana. Whitel
 |---|---|---|
 | Live app | Solflare SIWS, devnet | <https://enclz.com> |
 | Live docs | Docusaurus | <https://docs.enclz.com> |
-| Devnet program | Anchor on Solana devnet | [`45PiBcnk…AFaLW`](https://explorer.solana.com/address/45PiBcnkKhZbzb5GQDhJ9Rikwiz3DUzyoBwiKHbAFaLW?cluster=devnet) |
+| Devnet program | Anchor on Solana devnet | [`iv2qqLC9…RDQpgm`](https://explorer.solana.com/address/iv2qqLC9zdKPSjtnJJ1PSs8ajSWNga5TM6iDZRDQpgm?cluster=devnet) |
 | Agent SKILL.md | published | <https://enclz.com/SKILL.md> |
 | OpenAPI 3.1 | published | <https://enclz.com/openapi.json> |
 | Program SDK | npm | [`@enclz/sdk`](https://www.npmjs.com/package/@enclz/sdk) |

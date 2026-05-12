@@ -118,7 +118,7 @@ Existence = whitelisted. Close account = removed.
 
 `entry_type = 0` (intra-group): auto-added when an agent is created (`add_agent`). `ttl_expires_at = 0`, `approved_amount = 0`. Permanent.
 
-`entry_type = 1` (external recipient): TTL and approved_amount set by orchestrator. On `amount_used >= approved_amount`, the account is closed automatically by `execute_transfer` (auto-void). Expired entries (`now > ttl_expires_at`) are rejected and must be closed + re-created by the orchestrator.
+`entry_type = 1` (external recipient): TTL and approved_amount set by orchestrator. Transfers are rejected once `amount_used + amount > approved_amount` (`whitelist_amount_exhausted`) or `now > ttl_expires_at` (`whitelist_expired`); the orchestrator renews the entry via `renew_whitelist_entry` or closes and re-creates it via `remove_from_whitelist` + `add_to_whitelist`.
 
 `entry_type = 2` (protocol): enables deposit/withdraw. `ttl_expires_at = 0`, `approved_amount = 0`. Permanent. The DEX swap router is whitelisted as `entry_type = 2` at group initialization.
 
@@ -170,12 +170,12 @@ Called by the backend operator for every direct token transfer. Validates nonce,
 Accounts:
   backend_operator         [signer, writable]  // pays rent if recipient ATA needs init
   group_config             []
-  group_owner              [writable]   // group_config.owner — receives rent when an external whitelist entry auto-voids
+  group_owner              [writable]   // group_config.owner — address-bound
   agent_wallet             [writable]   // limits + nonce updated here
   from_token_account       [writable]   // agent vault ATA
   recipient_wallet         []            // pubkey constrained != protocol_fee_wallet and != agent_wallet PDA
   to_token_account         [writable]   // recipient ATA (auto-created via init_if_needed if missing)
-  whitelist_entry          [writable]   // PDA must exist for recipient address; mutated for type-1 amount_used and may be closed on auto-void
+  whitelist_entry          [writable]   // PDA must exist for recipient address; mutated for type-1 amount_used
   protocol_fee_token_acct  [writable]   // Enclz protocol ATA
   mint                     []            // must match agent_wallet.mint
   token_program            []
@@ -205,8 +205,7 @@ Enforcement (in order):
     - `total = amount + protocol_fee`
 11. Execute SPL token transfer: `amount` to recipient, `protocol_fee` to `protocol_fee_wallet` (total drained from agent = `amount + fee`)
 12. Increment `spent_today` (by `amount`, not `total` — fee is overhead, not spend) and `tx_count_this_hour`
-13. If `whitelist_entry.entry_type == 1`: increment `whitelist_entry.amount_used` by `amount`
-    - If `whitelist_entry.amount_used >= whitelist_entry.approved_amount`: close `whitelist_entry` PDA (auto-void, rent returned to owner)
+13. If `whitelist_entry.entry_type == 1`: increment `whitelist_entry.amount_used` by `amount`. The entry is NOT auto-closed on exhaustion — subsequent transfers fail with `whitelist_amount_exhausted` until the orchestrator renews or removes it.
 
 #### `execute_swap`
 Called by the backend operator for every swap routed through the whitelisted DEX aggregator. Authorisation rides on a `entry_type = 2` (protocol) `WhitelistEntry` keyed on the aggregator program ID, so the orchestrator can rotate router versions by editing the whitelist alone — no program redeploy. The handler deducts the protocol fee from the input mint **before** invoking the aggregator CPI; output mint is unknown to Enclz at signing time, which makes input-side fee the only deterministic option.
@@ -383,7 +382,7 @@ server/
     webhooks.js              // dispatchWebhook (fire-and-forget HMAC-signed events, refuses redirects)
     url-safety.js            // validateWebhookUrl (DNS rebinding protection)
     idempotency.js           // reserveOrAwait → complete/release pattern; PK is (key, agent_wallet_pda)
-    anchor-errors.js         // façade re-exporting the program's 6000–6013 discriminants; exports agentSafeError that sanitizes on-chain internals off the agent wire
+    anchor-errors.js         // façade re-exporting the program's 6000–6015 discriminants; exports agentSafeError that sanitizes on-chain internals off the agent wire
     crypto.js                // generateApiKey · hashSecret · verifySecret · generateInviteCode · signWebhookPayload
 
 src/                         // SPA — see §"Web App"
@@ -476,7 +475,7 @@ The SPA enumerates fleet metadata via Anchor account fetchers (`program.account.
 
 ### Policy Enforcement
 
-Limits and whitelist enforcement live exclusively on-chain. The backend submits the Anchor instruction directly and surfaces the program's custom error codes (6000–6013) as HTTP errors via `parseAnchorError`. The chain is the only authority.
+Limits and whitelist enforcement live exclusively on-chain. The backend submits the Anchor instruction directly and surfaces the program's custom error codes (6000–6015) as HTTP errors via `parseAnchorError`. The chain is the only authority.
 
 `server/lib/policy.js` exports `computeFee` (10 bps protocol fee) — the only policy function on the request path. `TEMPLATES` and `applyTemplate` are helper exports for tests and the policy-template UI.
 
@@ -536,7 +535,7 @@ if deposit / withdraw:
 
 submit_tx(signed by operator keypair)
   → on NonceMismatch (6006): resolveNonceMismatch (one resync + retry)
-  → on other Anchor errors (6000–6013): parseAnchorError → HTTP 403 with structured code
+  → on other Anchor errors (6000–6015): parseAnchorError → HTTP 403 with structured code
   → on RPC submission failure: 503 with retry_after
 
 re-fetch AgentWallet on-chain → populate daily_remaining / hourly_tx_remaining in response
@@ -661,7 +660,7 @@ Register a fleet-level webhook for policy events across all agents in the group.
 // Request
 {
   "url":         "string",   // must be HTTPS — validateWebhookUrl rejects loopback / RFC1918 / link-local / etc.
-  "event_types": ["string"]  // ["policy.limit_threshold","policy.limit_exceeded_attempt","policy.whitelist_violation","policy.whitelist_expiring","policy.whitelist_amount_threshold","policy.whitelist_voided"]
+  "event_types": ["string"]  // ["policy.limit_threshold","policy.limit_exceeded_attempt","policy.whitelist_violation","policy.whitelist_expiring","policy.whitelist_amount_threshold"]
 }
 
 // Response 200
@@ -1121,17 +1120,6 @@ All webhook requests are signed with `X-Enclavez-Signature: sha256=<hmac>`.
   "amount_used":      number,
   "amount_remaining": number,
   "timestamp":        number
-}
-
-// policy.whitelist_voided  (fired when approved_amount fully consumed and entry auto-closed)
-{
-  "event":           "policy.whitelist_voided",
-  "group_config_pda": "string",
-  "agent_wallet_pda": "string",
-  "address":         "string",
-  "label":           "string",
-  "approved_amount": number,
-  "timestamp":       number
 }
 ```
 

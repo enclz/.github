@@ -16,7 +16,7 @@ Solo developer or small team building a product where agents need to pay for thi
 
 **Pain**: Giving agents a private key means any misconfiguration, hallucination, or prompt injection can drain the wallet. Backend-enforced limits are only as secure as the backend. Key rotation requires redeployment.
 
-**Enclz fit**: Agent gets a scoped API key — never the private key. On-chain limits mean a hallucinating agent can't exceed $1/tx regardless of what the backend does. External service addresses are whitelisted with a time-bound, amount-capped approval — once the budget is consumed the slot auto-voids on-chain, not in a backend. Simulate endpoint lets agents pre-check before committing. Policy templates get them running in under 5 minutes.
+**Enclz fit**: Agent gets a scoped API key — never the private key. On-chain limits mean a hallucinating agent can't exceed $1/tx regardless of what the backend does. External service addresses are whitelisted with a time-bound, amount-capped approval enforced on-chain — once TTL expires or the approved amount is drained, the program rejects further transfers to that address until the orchestrator renews. Simulate endpoint lets agents pre-check before committing. Policy templates get them running in under 5 minutes.
 
 **Why #1**: Largest cohort of potential users. Ship to their existing frameworks with zero SDK dependency — REST API + `SKILL.md` is all they need. Pain is acute and immediate.
 
@@ -96,11 +96,11 @@ Demo flow takes under 3 minutes:
 2. Show orchestrator creating a group + agent (one curl command or web app wizard)
 3. Show orchestrator adding an external address: TTL = 7 days, approved amount = $5
 4. Show agent calling `POST /v1/transfer` — succeeds; whitelist `amount_used` increments on-chain
-5. Show agent calling `POST /v1/transfer` to same address after budget exhausted — `403 whitelist_amount_exhausted`; Solana Explorer confirms the `WhitelistEntry` PDA is closed
+5. Show agent calling `POST /v1/transfer` to same address after budget exhausted — `403 whitelist_amount_exhausted`; Solana Explorer confirms `WhitelistEntry.amount_used == approved_amount` on the still-live PDA
 6. Show agent calling `POST /v1/transfer` to unwhitelisted address — `403 whitelist_violation`
-7. Show fleet dashboard: amount remaining per entry, TTL countdown, `policy.whitelist_voided` webhook event fired
+7. Show fleet dashboard: amount remaining per entry, TTL countdown, `policy.whitelist_amount_threshold` webhook event fired
 
-The on-chain proof is the differentiator. Backend-only solutions can't demonstrate step 5: the whitelist PDA closed by the smart contract, verifiable on Explorer, independent of any backend state.
+The on-chain proof is the differentiator. Backend-only solutions can't demonstrate step 5: the program rejects the transfer with full state (`amount_used`, `approved_amount`) readable on Explorer, independent of any backend state.
 
 ---
 
@@ -165,7 +165,7 @@ One file per interview: date, persona type, framework used, current payment appr
 
 ¹ "No SDK required" describes the **agent integration path** (Agent REST API + MCP server). Direct on-chain callers — the Enclz backend, programs composing via CPI, security researchers, auditors — may use `@enclz/sdk` (npm) or fetch the IDL on-chain via `Program.fetchIdl()`. See `REQUIREMENTS.md` § Program Integration Resources.
 
-**Lead with**: enforcement survives backend compromise AND no SDK required AND TTL + amount-capped whitelist that auto-voids on-chain. Openfort can match the backend-compromise claim but requires an SDK, is EVM-first, and has no per-address amount ceiling or auto-void mechanic. No competitor ships a simulation endpoint, MCP server, or on-chain amount-exhaustion enforcement.
+**Lead with**: enforcement survives backend compromise AND no SDK required AND TTL + amount-capped whitelist enforced on-chain. Openfort can match the backend-compromise claim but requires an SDK, is EVM-first, and has no per-address amount ceiling. No competitor ships a simulation endpoint, MCP server, or on-chain amount-exhaustion enforcement.
 
 **Against Openfort specifically**: Solana-native architecture, zero-SDK REST + MCP integration, SKILL.md for LLM context injection, and simulation endpoint. Openfort is multi-chain generalist; Enclz is Solana-specialist with agent-first DX.
 
